@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title }}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 15mm 20mm 15mm;
+      @bottom-center {
+        content: counter(page);
+        font-family: 'Vazirmatn', 'Segoe UI', Tahoma, sans-serif;
+        font-size: 9pt;
+        color: #718096;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    body {
+      font-family: 'Vazirmatn', 'B Nazanin', 'Segoe UI', Tahoma, sans-serif;
+      direction: rtl;
+      text-align: right;
+      color: #1a202c;
+      background: #ffffff;
+      margin: 0;
+      padding: 0;
+      line-height: 1.7;
+      font-size: 10.5pt;
+    }
+
+    /* Cover / Header */
+    .book-header {
+      text-align: center;
+      border-bottom: 2px solid #2b6cb0;
+      padding-bottom: 12px;
+      margin-bottom: 24px;
+    }
+
+    .book-title {
+      font-size: 18pt;
+      font-weight: 800;
+      color: #2b6cb0;
+      margin: 0 0 6px 0;
+    }
+
+    .book-meta {
+      font-size: 9.5pt;
+      color: #4a5568;
+    }
+
+    /* Section divider */
+    .section-title {
+      font-size: 14pt;
+      font-weight: 700;
+      color: #1a365d;
+      border-bottom: 1px solid #e2e8f0;
+      padding-bottom: 6px;
+      margin: 30px 0 18px 0;
+      page-break-after: avoid;
+    }
+
+    /* Question Card */
+    .question-card {
+      page-break-inside: avoid;
+      break-inside: avoid;
+      margin-bottom: 22px;
+      padding: 14px 16px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      background: #fafafa;
+    }
+
+    .q-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      border-bottom: 1px dashed #cbd5e0;
+      padding-bottom: 4px;
+    }
+
+    .q-number {
+      font-weight: bold;
+      color: #2b6cb0;
+      font-size: 11pt;
+    }
+
+    .q-stem {
+      margin: 8px 0 12px 0;
+      font-size: 10.5pt;
+      line-height: 1.8;
+      color: #2d3748;
+    }
+
+    /* Options */
+    .q-options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .option-item {
+      display: flex;
+      align-items: baseline;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      font-size: 9.5pt;
+    }
+
+    .opt-label {
+      font-weight: bold;
+      margin-left: 8px;
+      min-width: 18px;
+      color: #4a5568;
+    }
+
+    .opt-text {
+      flex: 1;
+    }
+
+    /* Page break between questions and answers */
+    .page-break {
+      page-break-before: always;
+      break-before: page;
+    }
+
+    /* Answer Key Table */
+    .answer-key-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+      page-break-inside: avoid;
+    }
+
+    .answer-key-table th, .answer-key-table td {
+      border: 1px solid #cbd5e0;
+      padding: 6px 10px;
+      text-align: center;
+      font-size: 9.5pt;
+    }
+
+    .answer-key-table th {
+      background: #ebf8ff;
+      color: #2b6cb0;
+      font-weight: 700;
+    }
+
+    /* Detailed Explanations */
+    .expl-card {
+      page-break-inside: avoid;
+      break-inside: avoid;
+      margin-bottom: 20px;
+      padding: 12px 14px;
+      border-right: 4px solid #319795;
+      background: #f7fafc;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .expl-title {
+      font-weight: 700;
+      color: #234e52;
+      margin-bottom: 6px;
+      font-size: 10.5pt;
+    }
+
+    .expl-content {
+      font-size: 9.5pt;
+      line-height: 1.7;
+      color: #2d3748;
+    }
+
+    .mindmap-img {
+      max-width: 100%;
+      height: auto;
+      margin: 10px 0;
+      border-radius: 4px;
+      border: 1px solid #e2e8f0;
+    }
+
+    .correct-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      background: #c6f6d5;
+      color: #22543d;
+      border-radius: 4px;
+      font-weight: bold;
+      font-size: 9pt;
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="book-header">
+    <h1 class="book-title">{{ title }}</h1>
+    <div class="book-meta">
+      بانک سوالات تخصصی پزشکی — نسخه آفلاین | تعداد سوالات: {{ questions|length }}
+    </div>
+  </div>
+
+  <!-- بخش اول: متن سوالات -->
+  <div class="section-title">بخش اول: سوالات چهار گزینه‌ای</div>
+
+  {% for q in questions %}
+  <div class="question-card">
+    <div class="q-header">
+      <span class="q-number">سوال شماره {{ loop.index }}</span>
+    </div>
+
+    <div class="q-stem">
+      {{ q.stem_html | safe if q.stem_html else q.stem_text }}
+    </div>
+
+    <div class="q-options">
+      {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
+      {% for opt in q.options %}
+      <div class="option-item">
+        <span class="opt-label">{{ letters[opt.index - 1] }})</span>
+        <span class="opt-text">{{ opt.text }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+
+  {% if include_answers %}
+  <!-- بخش دوم: کلید و پاسخنامه تشریحی -->
+  <div class="page-break"></div>
+
+  <div class="section-title">بخش دوم: پاسخ‌نامه کلیدی</div>
+  <table class="answer-key-table">
+    <thead>
+      <tr>
+        <th>شماره</th>
+        <th>گزینه صحیح</th>
+        <th>شماره</th>
+        <th>گزینه صحیح</th>
+        <th>شماره</th>
+        <th>گزینه صحیح</th>
+        <th>شماره</th>
+        <th>گزینه صحیح</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
+      {% for row in questions | batch(4) %}
+      {% set row_idx = loop.index0 %}
+      <tr>
+        {% for q in row %}
+        <td>{{ loop.index + (row_idx * 4) }}</td>
+        <td><strong>{{ letters[q.correct_index - 1] if q.correct_index else '—' }}</strong></td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="section-title">بخش سوم: پاسخ‌نامه تشریحی و نکات آموزشی</div>
+
+  {% for q in questions %}
+  <div class="expl-card">
+    <div class="expl-title">
+      پاسخ تشریحی سوال {{ loop.index }}:
+      {% if q.correct_index %}
+      {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
+      <span class="correct-badge">گزینه صحیح: {{ letters[q.correct_index - 1] }} ({{ q.options[q.correct_index - 1].text }})</span>
+      {% endif %}
+    </div>
+
+    <div class="expl-content">
+      {% if q.explanation_html %}
+        {{ q.explanation_html | safe }}
+      {% elif q.explanation_text %}
+        <p>{{ q.explanation_text }}</p>
+      {% else %}
+        <p style="color: #a0aec0;">توضیحات تشریحی ثبت نشده است.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+
+</body>
+</html>

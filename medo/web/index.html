@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MedoOffline — بانک سوالات پزشکی</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+</head>
+<body class="theme-dark">
+  <!-- Top Navbar -->
+  <header class="navbar glass">
+    <div class="nav-brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <span class="brand-title">MedoOffline</span>
+        <span class="brand-sub">آرشیو آزمون‌های پزشکی</span>
+      </div>
+    </div>
+
+    <div class="nav-center">
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+        </svg>
+        <input type="text" id="searchInput" placeholder="جستجو در سوالات و پاسخ‌ها (کلید /)..." autocomplete="off">
+        <button id="clearSearchBtn" class="clear-btn" hidden>&times;</button>
+      </div>
+    </div>
+
+    <div class="nav-actions">
+      <button id="downloadModalBtn" class="nav-btn btn-highlight" title="دانلود و استخراج سوالات جدید از مدوفست">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+        </svg>
+        <span class="btn-label-desktop">دانلود سوالات</span>
+      </button>
+      <div class="stat-pill" id="scorePill" title="درصد پاسخ‌های صحیح">
+        <span class="stat-label">دقت:</span>
+        <span class="stat-value" id="scoreStat">۰٪</span>
+      </div>
+      <button id="paletteToggleBtn" class="nav-btn" title="پالت سوالات">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/>
+          <rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>
+        </svg>
+      </button>
+      <button id="themeToggleBtn" class="nav-btn" title="تغییر حالت شب/روز">
+        <svg class="moon-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="app-layout">
+    <!-- Questions Drawer / Sidebar -->
+    <aside class="palette-sidebar glass" id="paletteSidebar">
+      <div class="sidebar-header">
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all">همه (<span id="countAll">0</span>)</button>
+          <button class="filter-tab" data-filter="answered">پاسخ‌داده (<span id="countAnswered">0</span>)</button>
+          <button class="filter-tab" data-filter="bookmarked">نشان‌شده (<span id="countBookmarked">0</span>)</button>
+        </div>
+      </div>
+      <div class="palette-grid" id="paletteGrid">
+        <!-- Rendered via JS -->
+      </div>
+    </aside>
+
+    <!-- Question Viewport -->
+    <section class="viewer-container">
+      <div class="card question-card glass" id="questionCard">
+        <!-- Card Top Bar -->
+        <div class="card-top-bar">
+          <div class="q-meta-badges">
+            <span class="badge badge-topic" id="topicBadge">مبحث</span>
+            <span class="badge badge-index" id="indexBadge">سوال ۱ از ۱</span>
+            <span class="badge badge-status" id="statusBadge">بی‌پاسخ</span>
+          </div>
+
+          <div class="card-controls">
+            <button id="bookmarkBtn" class="action-icon-btn" title="نشان‌کردن این سوال (کلید B)">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
+            <button id="resetAnswerBtn" class="action-icon-btn" title="پاسخ مجدد">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                <path d="M3 3v5h5"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Question Stem -->
+        <div class="stem-container" id="stemContent">
+          <!-- Stem HTML injected here -->
+        </div>
+
+        <!-- Options Grid -->
+        <div class="options-container" id="optionsContainer">
+          <!-- Options injected here -->
+        </div>
+
+        <!-- Explanation Accordion -->
+        <div class="explanation-box glass" id="explanationBox" style="display: none;">
+          <div class="explanation-header" id="explanationHeader">
+            <div class="expl-title-wrap">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>
+              </svg>
+              <span>پاسخ تشریحی و تحلیل جامع</span>
+            </div>
+            <span class="chevron-icon">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="6 9 12 15 18 9"/>
+              </svg>
+            </span>
+          </div>
+
+          <div class="explanation-body" id="explanationBody">
+            <div id="explanationContent"></div>
+          </div>
+        </div>
+
+        <!-- Bottom Navigation Controls -->
+        <div class="nav-controls">
+          <button id="prevBtn" class="btn btn-secondary">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+            <span>سوال قبلی</span>
+          </button>
+
+          <div class="jump-slider-wrap">
+            <input type="range" id="jumpSlider" min="1" max="1" value="1">
+          </div>
+
+          <button id="nextBtn" class="btn btn-primary">
+            <span>سوال بعدی</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Scraper & Download Modal -->
+  <div class="modal" id="scraperModal">
+    <div class="modal-backdrop" id="scraperBackdrop"></div>
+    <div class="modal-card glass">
+      <div class="modal-header">
+        <div class="modal-title">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+          </svg>
+          <span>استخراج و دانلود سوالات از مدوفست</span>
+        </div>
+        <button class="modal-close-icon" id="scraperCloseBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Auth Status Box -->
+        <div class="auth-box glass" id="authBox">
+          <div class="auth-info">
+            <span class="auth-dot" id="authDot"></span>
+            <span id="authStatusText">در حال بررسی ورود به حساب...</span>
+          </div>
+          <button class="btn btn-sm btn-secondary" id="loginHelperBtn">ورود با مرورگر (Login)</button>
+        </div>
+
+        <!-- Scrape Form -->
+        <div class="scrape-form">
+          <div class="form-row">
+            <label for="topicInput">شماره یا آدرس مبحث:</label>
+            <input type="text" id="topicInput" placeholder="مثلاً 79 یا https://medofast.ir/qbank/topic-id-79" value="79">
+          </div>
+          <div class="form-row-grid">
+            <div class="form-col">
+              <label for="startPageInput">صفحه شروع (اختیاری):</label>
+              <input type="number" id="startPageInput" placeholder="ادامه خودکار" min="1">
+            </div>
+            <div class="form-col">
+              <label for="maxPagesInput">حداکثر صفحات:</label>
+              <input type="number" id="maxPagesInput" placeholder="مثلاً: 50" min="1" value="50">
+            </div>
+          </div>
+          
+          <div class="scrape-actions">
+            <button class="btn btn-primary" id="startScrapeBtn">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              <span>شروع دانلود سوالات</span>
+            </button>
+            <button class="btn btn-danger" id="stopScrapeBtn" style="display:none;">
+              <span>توقف دانلود</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Progress & Logs -->
+        <div class="scrape-progress-box" id="scrapeProgressBox" style="display:none;">
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill" id="scrapeProgressBar"></div>
+          </div>
+          <div class="scrape-status-meta">
+            <span id="scrapeStatusText">در حال اجرا...</span>
+            <span id="scrapeCountText">۰ سوال استخراج شد</span>
+          </div>
+          <div class="scrape-log-terminal" id="scrapeLogTerminal">
+            <!-- Live logs injected here -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Image Lightbox Modal -->
+  <div class="modal" id="imageModal">
+    <div class="modal-backdrop" id="modalBackdrop"></div>
+    <div class="modal-content">
+      <img id="modalImage" src="" alt="Mindmap preview">
+      <button class="modal-close" id="modalCloseBtn">&times;</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+# MedoOffline .gitignore
+# Never commit scraped content or session files
+
+# ---- CRITICAL: scraped data ----
+data/
+storage_state.json
+*.storage_state.json
+
+# ---- CRITICAL: saved site pages (scraped content) ----
+tests/fixtures/*.mhtml
+tests/fixtures/*.mht
+tests/fixtures/*.html
+
+# ---- dist artifacts ----
+dist/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+*.egg
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# ---- pytest / coverage ----
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# ---- IDE ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- OS ----
+Thumbs.db
+.DS_Store
+
+# ---- Node (for any tooling) ----
+node_modules/
