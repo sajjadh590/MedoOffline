@@ -28,6 +28,7 @@ import random
 import re
 import signal
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -45,6 +46,7 @@ from medo.db import (
     topics_needing_refill,
     update_scrape_state,
     upsert_asset,
+    upsert_category,
     upsert_question,
 )
 from medo.models import ExplanationStatus, ParsedQuestion
@@ -146,6 +148,176 @@ def needs_submit(parsed: ParsedQuestion) -> bool:
     return parsed.correct_index is None and bool(parsed.options)
 
 
+# --- hierarchy discovery ----------------------------------------------------
+_CAT_RE = re.compile(r"/qbank/cat-id-(\d+)")
+_TOPIC_RE = re.compile(r"/qbank/topic-id-(\d+)")
+_KIND_BY_DEPTH = ("category", "lesson", "section")  # depth 0, 1, 2+
+_FA_DIGITS = str.maketrans("\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9", "0123456789")
+
+
+class _LinkParser(HTMLParser):
+    """Collect qbank links in document order with their visible text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[dict] = []
+        self._href: Optional[str] = None
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag.lower() != "a" or self._href is not None:
+            return
+        href = dict(attrs).get("href") or ""
+        if _CAT_RE.search(href) or _TOPIC_RE.search(href):
+            self._href = href
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._href is not None:
+            self.links.append({"href": self._href, "title": "".join(self._parts)})
+            self._href = None
+            self._parts = []
+
+
+def extract_menu_links(html: str) -> list[dict]:
+    """All qbank category/topic links on a page, document order, deduped.
+
+    Pure function (unit-testable): returns [{href, title, kind, count}] where
+    kind is 'topic' or a depth placeholder decided by the caller, and count is
+    the first number found in the link text (Persian or ASCII digits), else 0.
+    """
+    from medo.text_utils import normalize_single_line as clean_text
+
+    parser = _LinkParser()
+    parser.feed(html)
+    seen: set[str] = set()
+    out: list[dict] = []
+    for link in parser.links:
+        href = link["href"]
+        # Normalise to a path so ?query fragments never duplicate a node
+        path = href.split("?")[0].rstrip("/")
+        m_t = _TOPIC_RE.search(path)
+        m_c = _CAT_RE.search(path)
+        if not (m_t or m_c):
+            continue
+        key = path
+        if key in seen:
+            continue
+        seen.add(key)
+        title = clean_text(link["title"])
+        m = re.search(r"(\d[\d,]*)", title.translate(_FA_DIGITS))
+        count = int(m.group(1).replace(",", "")) if m else 0
+        title = re.sub(r"[\(\[]?\s*\d[\d,]*\s*[\)\]]?\s*$", "", title).strip(" -:\u2022")
+        out.append({
+            "href": path,
+            "site_id": int(m_t.group(1)) if m_t else int(m_c.group(1)),
+            "kind": "topic" if m_t else "cat",
+            "title": title,
+            "count": count,
+        })
+    return out
+
+
+def discover_hierarchy(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    *,
+    headless: bool = True,
+    storage_state: Optional[Path | str] = None,
+    max_pages: int = 400,
+    delay_range: tuple[float, float] = (DELAY_MIN, DELAY_MAX),
+) -> dict:
+    """Crawl /main-menu → subcategories once and store the exact site tree.
+
+    BFS over cat-id pages (topics are leaves). Polite: one document at a time
+    with the same random delay. Stores original Persian titles, document-order
+    position and per-node question counts. Returns a summary dict.
+    """
+    from collections import deque
+    from urllib.parse import urljoin
+
+    conn = get_connection(db_path)
+    init_db(conn)
+
+    harvester = Harvester(db_path=db_path, storage_state=storage_state,
+                          delay_range=delay_range, headless=headless)
+    harvester._setup_signal_handlers()
+
+    stored: dict[str, int] = {}   # path -> row id (avoids re-upserting)
+    summary = {"nodes": 0, "categories": 0, "topics": 0}
+    pages_fetched = 0
+
+    # queue items: (page_path, parent_row_id, child_depth)
+    queue: deque[tuple[str, Optional[int], int]] = deque()
+    queue.append(("/main-menu", None, 0))
+    visited: set[str] = set()
+
+    with sync_playwright() as p:
+        browser, page = harvester._new_page(p)
+        try:
+            while queue and pages_fetched < max_pages and not harvester._interrupted:
+                path, parent_id, depth = queue.popleft()
+                if path in visited:
+                    continue
+                visited.add(path)
+                try:
+                    page.goto(urljoin(BASE_URL, path), wait_until="domcontentloaded",
+                              timeout=45000)
+                    page.wait_for_timeout(800)
+                except PlaywrightError as ex:
+                    print(f"[!] discover: could not load {path}: {ex}")
+                    continue
+                pages_fetched += 1
+                html = page.content()
+                links = extract_menu_links(html)
+                body = page.locator("body").inner_text(timeout=8000)
+                if any(ph in body for ph in LOGIN_PHRASES):
+                    print("[!] discover: login required — run `medo login` first.")
+                    break
+                if any(ph in body for ph in LIMIT_PHRASES):
+                    print("[!] discover: quota/limit message — stopping cleanly.")
+                    break
+
+                for i, link in enumerate(links):
+                    if link["href"] in stored:
+                        node_id = stored[link["href"]]
+                    else:
+                        if link["kind"] == "topic":
+                            kind = "topic"
+                            summary["topics"] += 1
+                        else:
+                            kind = _KIND_BY_DEPTH[min(depth, len(_KIND_BY_DEPTH) - 1)]
+                            summary["categories"] += 1
+                        node_id = upsert_category(
+                            conn,
+                            kind=kind,
+                            title=link["title"] or f"{kind} {link['site_id']}",
+                            source_url=link["href"],
+                            parent_id=parent_id,
+                            position=i,
+                            question_count=link["count"],
+                        )
+                        stored[link["href"]] = node_id
+                        summary["nodes"] += 1
+                    if link["kind"] == "cat":
+                        queue.append((link["href"], node_id, depth + 1))
+
+                print(f"[+] discover {path}: {len(links)} link(s), "
+                      f"queue {len(queue)}, {pages_fetched} page(s) fetched")
+                harvester._polite_delay()
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        conn.close()
+
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Harvester
 # ---------------------------------------------------------------------------
@@ -193,6 +365,7 @@ class Harvester:
         self._question_times: list[float] = []
         self._question_bytes: list[int] = []
         self._estimate_printed = False
+        self._topic_paths: Optional[dict[str, str]] = None
 
     # -- signals / budgets ---------------------------------------------------
 
@@ -398,7 +571,11 @@ class Harvester:
 
     def _record_question(self, conn, q: ParsedQuestion, topic_id: int) -> int:
         self._store_assets(conn, q)
-        qid = upsert_question(conn, q, topic_id=topic_id)
+        if self._topic_paths is None:
+            from medo.db import build_topic_paths
+            self._topic_paths = build_topic_paths(conn)
+        cat_path = self._topic_paths.get(f"/qbank/topic-id-{topic_id}")
+        qid = upsert_question(conn, q, topic_id=topic_id, category_path=cat_path)
         self._question_times.append(time.monotonic())
         self._question_bytes.append(self._bytes_this_question)
         self._bytes_this_question = 0

@@ -46,27 +46,85 @@ def login(
 
 @app.command()
 def scrape(
-    topic: int = typer.Option(79, "--topic", "-t", help="Topic ID to scrape (e.g. 79)"),
+    topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Topic ID to scrape (e.g. 79)"),
+    all_topics: bool = typer.Option(False, "--all", help="Scrape every topic found in the category tree, in order"),
     start_page: Optional[int] = typer.Option(None, "--start", help="Start page (defaults to resume from last)"),
     max_pages: Optional[int] = typer.Option(None, "--max", help="Max pages to scrape in this run"),
+    max_minutes: Optional[float] = typer.Option(None, "--max-minutes", help="Stop cleanly after N minutes (time-boxed batch)"),
+    max_questions: Optional[int] = typer.Option(None, "--max-questions", help="Stop cleanly after N questions"),
+    refill: bool = typer.Option(False, "--refill-explanations", help="Revisit only questions whose explanation_status != full"),
     delay_min: float = typer.Option(1.5, "--delay-min", help="Minimum uniform random delay in seconds"),
     delay_max: float = typer.Option(3.0, "--delay-max", help="Maximum uniform random delay in seconds"),
     headless: bool = typer.Option(True, "--headless/--no-headless", help="Run browser in headless mode"),
+    storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path (default: data/storage_state.json or $MEDO_STORAGE_STATE)"),
     db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
 ):
     """
-    Scrape questions for a topic politely (1 request at a time, random delay, resumable).
+    Scrape questions politely: 1 request at a time, random delay 1.5-3 s,
+    exponential backoff, resumable from the exact page (--resume is default).
     """
+    from medo.db import get_connection, list_topic_ids
     from medo.scraper import Harvester
 
-    console.print(f"[bold cyan][*] Starting harvester for topic {topic}...[/bold cyan]")
     harvester = Harvester(
         db_path=db_path,
+        storage_state=storage_state,
         delay_range=(delay_min, delay_max),
         headless=headless,
+        max_minutes=max_minutes,
+        max_questions=max_questions,
     )
-    result = harvester.scrape_topic(topic_id=topic, start_page=start_page, max_pages=max_pages)
-    console.print(f"[bold green][+] Finished! Scraped {result['scraped_count']} questions. Last page: {result['last_page']}[/bold green]")
+
+    if refill:
+        console.print("[bold cyan][*] Refilling explanations (only non-full)...[/bold cyan]")
+        result = harvester.refill_explanations([topic] if topic else None)
+    elif topic is not None:
+        console.print(f"[bold cyan][*] Starting harvester for topic {topic}...[/bold cyan]")
+        result = harvester.scrape_topic(topic_id=topic, start_page=start_page, max_pages=max_pages)
+    elif all_topics:
+        conn = get_connection(db_path)
+        topics = list_topic_ids(conn, include_done=False)
+        conn.close()
+        if not topics:
+            console.print("[yellow][!] No topics in the category tree yet — run `medo discover` first.[/yellow]")
+            raise typer.Exit(code=1)
+        console.print(f"[bold cyan][*] Scraping {len(topics)} topic(s) in order...[/bold cyan]")
+        result = harvester.scrape_many(topics, max_pages_per_topic=max_pages)
+    else:
+        console.print("[red][!] Pass --topic N, --all, or --refill-explanations.[/red]")
+        raise typer.Exit(code=1)
+
+    status = result.get("status", "done")
+    color = "bold green" if status in {"completed", "done"} else "bold yellow"
+    console.print(
+        f"[{color}][+] Stopped ({status}): {result.get('scraped_count', 0)} question(s) "
+        f"this run, last page {result.get('last_page', '?')}. "
+        f"State saved — rerun the same command to resume.[/{color}]"
+    )
+    if result.get("detail"):
+        console.print(f"    {result['detail']}")
+
+
+@app.command()
+def discover(
+    headless: bool = typer.Option(True, "--headless/--no-headless"),
+    storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path"),
+    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+):
+    """
+    Crawl /main-menu once and store the site's exact category tree
+    (category → lesson → section → topic, original titles, order, counts).
+    """
+    from medo.scraper import discover_hierarchy
+
+    console.print("[bold cyan][*] Discovering category hierarchy from /main-menu...[/bold cyan]")
+    summary = discover_hierarchy(
+        db_path=db_path, headless=headless, storage_state=storage_state)
+    console.print(
+        f"[bold green][+] Stored {summary['nodes']} node(s): "
+        f"{summary['categories']} categories, {summary['topics']} topics."
+        f"[/bold green]"
+    )
 
 
 @app.command()

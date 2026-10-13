@@ -5,6 +5,7 @@ SQLite storage layer with WAL mode and FTS5 full-text search.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from typing import Generator, Optional
 from medo.models import AnswerSource, ExplanationStatus, ParsedImage, ParsedOption, ParsedQuestion
 
 DEFAULT_DB_PATH = Path("data/medo.db")
+_TOPIC_ID_RE = re.compile(r"topic-id-(\d+)")
 
 
 def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -163,11 +165,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             END;
         """)
 
+        # Full hierarchy path per question (added later; migrate old DBs)
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(questions)").fetchall()}
+        if "category_path" not in cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN category_path TEXT;")
+
 
 def upsert_question(
     conn: sqlite3.Connection,
     q: ParsedQuestion,
     topic_id: Optional[int] = None,
+    category_path: Optional[str] = None,
 ) -> int:
     """
     Insert or update a parsed question by its content_hash.
@@ -206,6 +214,7 @@ def upsert_question(
                     explanation_text = coalesce(?, explanation_text),
                     explanation_status = ?,
                     has_images = ?,
+                    category_path = coalesce(?, category_path),
                     updated_at = ?
                 WHERE id = ?
             """, (
@@ -223,6 +232,7 @@ def upsert_question(
                 q.explanation_text,
                 q.explanation_status.value,
                 1 if q.has_images else 0,
+                category_path,
                 now,
                 qid,
             ))
@@ -233,8 +243,8 @@ def upsert_question(
                     content_hash, stem_html, stem_text, options_json,
                     correct_index, answer_source, vote_percent_json,
                     explanation_html, explanation_text, explanation_status,
-                    has_images, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    has_images, category_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 topic_id,
                 q.source_url,
@@ -251,6 +261,7 @@ def upsert_question(
                 q.explanation_text,
                 q.explanation_status.value,
                 1 if q.has_images else 0,
+                category_path,
                 now,
                 now,
             ))
@@ -537,6 +548,83 @@ def list_topic_ids(conn: sqlite3.Connection, include_done: bool = True) -> list[
         ).fetchall()
     }
     return [t for t in ids if t not in done]
+
+
+def build_topic_paths(conn: sqlite3.Connection) -> dict[str, str]:
+    """Map every node's source_url → full path of Persian titles
+    (e.g. '/qbank/topic-id-79' → 'طب داخلی » قلب » آریتمی‌ها')."""
+    nodes = get_categories(conn)
+    by_id = {n["id"]: n for n in nodes}
+
+    def path_of(n: dict) -> str:
+        parts = [n["title"]]
+        p = n.get("parent_id")
+        seen = {n["id"]}
+        while p is not None and p in by_id and p not in seen:
+            seen.add(p)
+            parts.append(by_id[p]["title"])
+            p = by_id[p].get("parent_id")
+        return " » ".join(reversed(parts))
+
+    return {n["source_url"]: path_of(n) for n in nodes}
+
+
+def refresh_question_paths(conn: sqlite3.Connection, topic_id: Optional[int] = None) -> int:
+    """Backfill questions.category_path from the discovered hierarchy.
+
+    Returns the number of rows updated. Safe to run repeatedly.
+    """
+    paths = build_topic_paths(conn)
+    if not paths:
+        return 0
+    updated = 0
+    for node_url, path in paths.items():
+        m = _TOPIC_ID_RE.search(node_url or "")
+        if not m:
+            continue
+        tid = int(m.group(1))
+        if topic_id is not None and tid != topic_id:
+            continue
+        with transaction(conn) as c:
+            c.execute(
+                "UPDATE questions SET category_path = ? "
+                "WHERE topic_id = ? AND (category_path IS NULL OR category_path != ?)",
+                (path, tid, path),
+            )
+            updated += max(c.rowcount, 0)
+    return updated
+
+
+def get_category_progress(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Per-node progress: {source_url: {scraped, status, total_pages, last_page}}.
+
+    scraped = questions stored for that topic; status from scrape_state
+    ('completed' | 'running' | 'paused' | 'limit' | ... | None if never run).
+    """
+    cur = conn.cursor()
+    rows = cur.execute(
+        "SELECT topic_id, count(*) AS n FROM questions "
+        "WHERE topic_id IS NOT NULL GROUP BY topic_id"
+    ).fetchall()
+    by_topic = {r["topic_id"]: r["n"] for r in rows}
+
+    states = {
+        r["topic_id"]: dict(r)
+        for r in (dict(x) for x in cur.execute("SELECT * FROM scrape_state").fetchall())
+    }
+    out: dict[str, dict] = {}
+    for n in get_categories(conn):
+        m = _TOPIC_ID_RE.search(n["source_url"] or "")
+        tid = int(m.group(1)) if m else None
+        st = states.get(tid) if tid is not None else None
+        out[n["source_url"]] = {
+            "scraped": by_topic.get(tid, 0) if tid is not None else 0,
+            "declared": n.get("question_count") or 0,
+            "status": (st or {}).get("status"),
+            "last_page": (st or {}).get("last_page", 0),
+            "total_pages": (st or {}).get("total_pages", 0),
+        }
+    return out
 
 
 def get_database_stats(conn: sqlite3.Connection) -> dict:
