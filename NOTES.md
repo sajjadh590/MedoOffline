@@ -77,6 +77,12 @@
 ## Implementation Status
 
 - [x] **Phase 1 — Parser + Fixtures**: 41/41 unit tests passing. Watermark stripping, invisible Unicode character filtering, NFKC normalization, base64 option decoding, answer detection (marker & color).
+- [x] **Phase 1b — Real-capture validation (2026-10-12)**: parser validated against the
+  user's real Chrome MHTML save (`tests/fixtures/real_before.mhtml`, git-ignored).
+  Stem, options, vote percents, marker answer (3) and full explanation all parse;
+  sanitizer default-denies attributes (no `inert`/`data-*` leaks), strips invisible
+  Unicode from HTML fields, converts coloured/bold highlights to `<mark>`/`<b>`.
+  8 new regression tests in `tests/test_real_fixture.py`; suite 60/60.
 - [x] **Phase 2 — Database Layer (`medo/db.py`)**: SQLite in WAL mode with FTS5 Persian full-text search, automatic deduplication by SHA-256 content hash, resumable `scrape_state` table, media asset tracking. 7 unit tests passing.
 - [x] **Phase 3 — Auth & Scraper & Assets (`medo/auth.py`, `medo/scraper.py`, `medo/assets.py`, `medo/browser.py`)**:
   - `medo/auth.py`: Interactive manual login helper that captures Playwright `storage_state.json` without storing passwords.
@@ -95,7 +101,9 @@
 ## Open Issues / TODOs
 
 - [x] System Chrome discovered and integrated for PDF generation and Playwright headless runs.
-- [ ] Confirm whether `#q-stem-container` id is stable across all topic pages or only the sample.
+- [x] Confirm whether `#q-stem-container` id is stable across all topic pages or only the sample.
+  → **Answered 2026-10-12**: it exists only in synthetic fixtures. Real pages use
+  `#qtxt` + random-class sibling blocks + `<style>` cascade (see above).
 - [ ] Determine exact network endpoint for pagination (XHR vs full page load) during live run.
 - [ ] Check whether `prograssBar` (with double 's') is consistent spelling or a typo that varies.
 - [ ] Verify GFR/contraindication block presence for "locked" explanation detection.

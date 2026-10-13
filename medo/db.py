@@ -430,6 +430,115 @@ def toggle_bookmark(conn: sqlite3.Connection, question_id: int) -> bool:
         return bool(new_val)
 
 
+def topics_needing_refill(conn: sqlite3.Connection) -> list[int]:
+    """Distinct topic ids that hold questions without a full explanation.
+
+    Drives `medo scrape --refill-explanations`: later, with a better account
+    tier, those topics are revisited to fill the gaps (never evading limits).
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT DISTINCT topic_id FROM questions
+           WHERE topic_id IS NOT NULL
+             AND (explanation_status != 'full'
+                  OR explanation_text IS NULL
+                  OR length(explanation_text) < 30)
+           ORDER BY topic_id"""
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def upsert_category(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    title: str,
+    source_url: str,
+    parent_id: Optional[int] = None,
+    position: int = 0,
+    question_count: int = 0,
+    node_id: Optional[int] = None,
+) -> int:
+    """Insert or update one hierarchy node (category/lesson/section/topic).
+
+    Identity: the source_url (site ids are NOT reused as primary keys —
+    auto rowids avoid colliding with site topic ids like 79).
+    Returns the row id.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with transaction(conn) as cur:
+        cur.execute("SELECT id FROM categories WHERE source_url = ?", (source_url,))
+        row = cur.fetchone()
+        if row:
+            rid = row[0]
+            cur.execute(
+                """UPDATE categories SET
+                       parent_id = coalesce(?, parent_id), title = ?,
+                       kind = ?, position = ?,
+                       question_count = max(question_count, ?),
+                       updated_at = ?
+                   WHERE id = ?""",
+                (parent_id, title, kind, position, question_count, now, rid),
+            )
+            return rid
+
+        cur.execute(
+            """INSERT INTO categories
+                   (id, parent_id, kind, title, source_url, position,
+                    question_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (None, parent_id, kind, title, source_url, position,
+             question_count, now, now),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def get_categories(conn: sqlite3.Connection) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM categories ORDER BY coalesce(parent_id, 0), position, id"
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_category_tree(conn: sqlite3.Connection) -> list[dict]:
+    """Nested tree (children ordered by position) for the web UI."""
+    nodes = get_categories(conn)
+    by_id = {n["id"]: {**n, "children": []} for n in nodes}
+    roots: list[dict] = []
+    for n in by_id.values():
+        parent = n.get("parent_id")
+        if parent is not None and parent in by_id:
+            by_id[parent]["children"].append(n)
+        else:
+            roots.append(n)
+    return roots
+
+
+def list_topic_ids(conn: sqlite3.Connection, include_done: bool = True) -> list[int]:
+    """Site topic ids (from source_url), in hierarchy order;
+    optionally only topics whose scrape_state is not completed."""
+    import re as _re
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT source_url FROM categories WHERE kind = 'topic' ORDER BY position, id"
+    )
+    ids: list[int] = []
+    for (url,) in cur.fetchall():
+        m = _re.search(r"topic-id-(\d+)", url or "")
+        if m:
+            ids.append(int(m.group(1)))
+    if include_done:
+        return ids
+    done = {
+        r[0]
+        for r in conn.execute(
+            "SELECT topic_id FROM scrape_state WHERE status = 'completed'"
+        ).fetchall()
+    }
+    return [t for t in ids if t not in done]
+
+
 def get_database_stats(conn: sqlite3.Connection) -> dict:
     """Return database aggregate summary statistics."""
     cur = conn.cursor()
