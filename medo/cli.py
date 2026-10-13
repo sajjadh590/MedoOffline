@@ -139,12 +139,32 @@ def serve(
     start_server(port=port, db_path=db_path)
 
 
-@app.command(name="export-pdf")
+def _print_partial_note(db_path: Path) -> None:
+    """Warn which topics are still incomplete in a partial build."""
+    from medo.db import get_category_progress, get_connection
+
+    try:
+        conn = get_connection(db_path)
+        prog = get_category_progress(conn)
+        conn.close()
+    except Exception:
+        return
+    partial = [u for u, s in prog.items()
+               if s["status"] not in {"completed"} and s["scraped"] > 0]
+    never = [u for u, s in prog.items() if s["scraped"] == 0]
+    if partial:
+        console.print(f"[yellow][!] Partial build — {len(partial)} topic(s) still in progress, marked as partial.[/yellow]")
+    if never:
+        console.print(f"[yellow][i] {len(never)} topic(s) not scraped yet — skipped.[/yellow]")
+
+
+@app.command(name="build-pdf", aliases=["export-pdf"])
 def export_pdf_cmd(
     output: Path = typer.Option(Path("medo_test_book.pdf"), "--output", "-o", help="Output PDF file path"),
     topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Filter by specific topic ID"),
     title: Optional[str] = typer.Option(None, "--title", help="Custom title for test book"),
     include_answers: bool = typer.Option(True, "--answers/--no-answers", help="Include answer key and explanations"),
+    partial: bool = typer.Option(False, "--partial", help="Allow building from a half-finished database (incomplete topics marked)"),
     db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
 ):
     """
@@ -160,17 +180,21 @@ def export_pdf_cmd(
             topic_id=topic,
             title=title,
             include_answers=include_answers,
+            partial=partial,
         )
         console.print(f"[bold green][+] PDF successfully generated: {out_file}[/bold green]")
+        if partial:
+            _print_partial_note(db_path)
     except Exception as ex:
         console.print(f"[bold red][!] Error generating PDF: {ex}[/bold red]")
         raise typer.Exit(code=1)
 
 
-@app.command(name="export-web")
+@app.command(name="build-web", aliases=["export-web"])
 def export_web_cmd(
     output_dir: Path = typer.Option(Path("dist"), "--output", "-o", help="Output directory"),
     topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Filter by specific topic ID"),
+    partial: bool = typer.Option(False, "--partial", help="Allow building from a half-finished database (incomplete topics marked)"),
     db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
 ):
     """
@@ -179,8 +203,11 @@ def export_web_cmd(
     from medo.exporter import export_web_bundle
 
     console.print(f"[cyan][*] Exporting web viewer to {output_dir}...[/cyan]")
-    out_dir = export_web_bundle(output_dir=output_dir, db_path=db_path, topic_id=topic)
+    out_dir = export_web_bundle(output_dir=output_dir, db_path=db_path,
+                                topic_id=topic, partial=partial)
     console.print(f"[bold green][+] Web bundle exported to {out_dir}. Double-click index.html to view.[/bold green]")
+    if partial:
+        _print_partial_note(db_path)
 
 
 @app.command()

@@ -291,3 +291,68 @@ python -m medo.cli export-web --output dist/
 python -m medo.cli import-fixtures
 ```
 
+---
+
+## Status snapshot (2026-10-13) — saved while user stepped away
+
+### Done & verified (60/60 pytest green, committed)
+
+1. **Parser** handles the REAL medofast capture (`tests/fixtures/real_before.mhtml`):
+   - Stem found via obfuscation-stylesheet visibility rules (real page has no
+     `#q-stem-container`; real stem lives in `#qtxt` with random-class children;
+     decoys + a decoy copy of the stem are hidden by per-page-random CSS).
+   - Sanitizer is default-deny (no more `inert`/junk `data-*` leakage into
+     stored `stem_html`), keeps `<mark>`/`<b>` from inline-colour highlights.
+   - `tests/test_real_fixture.py` locks in real-page behaviour.
+2. **Scraper (`medo/scraper.py`) is now the real thing** (was missing before):
+   - UI-driven pagination via `button[data-nav-role="next"]`; `?page=N` fast
+     path is *verified* via the button's data-page before being trusted, else
+     it walks forward from page 1 clicking.
+   - Question detection reuses the parser (never class names); submit fallback
+     only when the marker didn't give the answer.
+   - Per-question WAL commit, `scrape_state` cursor, SIGINT/SIGTERM graceful
+     stop, `--max-minutes` / `--max-questions` budgets, exponential backoff,
+     clean stop on 429/403/captcha/limit phrases, bandwidth/time estimate after
+     20 questions, ads/trackers/fonts blocked, assets deduped via `medo.assets`.
+3. **CLI wired**: `medo scrape` has `--topic / --all / --refill-explanations /
+   --max-minutes / --max-questions / --state / --no-headless`; new `medo discover`;
+   `build-web`/`build-pdf` (aliases `export-*`) with `--partial`.
+4. **Hierarchy**: `discover_hierarchy()` BFS-crawls `/main-menu` → cat-id pages,
+   stores original Persian titles, document-order position, per-node counts in
+   `categories`; `questions.category_path` (e.g. «دسته » درس » مبحث») is stored
+   per question; `build_topic_paths`/`refresh_question_paths`/`get_category_progress`
+   helpers in `medo/db.py` (old DBs migrated via `ALTER TABLE` in `init_db`).
+5. **PDF**: book template now groups questions under breadcrumb section headers
+   with global numbering; incomplete topics get a printed «ناقص» marker with
+   `--partial`.
+6. **Web bundle**: `categories.js`/`categories.json` (tree + per-node progress +
+   partial flag) exported alongside questions.
+
+### Open issues / next steps (in priority order)
+
+1. **Web UI tree + breadcrumb not rendered yet** — `medo/web/index.html` still
+   loads Google Fonts (violates offline/PWA requirement) and `app.js` doesn't
+   render `window.MEDO_TREE` (collapsible tree, breadcrumb, per-node progress).
+   Exporter already emits the data; UI work pending. Also no PWA
+   manifest/service-worker yet.
+2. **Vazirmatn font not bundled locally** — needed for offline + PDF.
+3. **`.github/workflows/scrape.yml` not written yet** (dir exists, empty).
+   Spec: workflow_dispatch + optional cron, 330-min batches, restore/upload
+   `data/` artifact, IP-block guard abort with clear message.
+4. **Live pagination still unverified** — earlier probe got 403 without a
+   login session (`scripts/probe_live.py`). First real run should start small:
+   `medo login`, then `medo scrape --topic 79 --max 5` and watch it.
+   The `?page=N` assumption is defensive but unconfirmed.
+5. **Server (`medo serve`)** doesn't expose the category tree/progress API yet
+   (static web UI shares the same gap as #1).
+6. Tests for new helpers (extract_menu_links, refresh_question_paths,
+   get_category_progress, build-web --partial) not added yet — manual checks
+   above all passed.
+
+### Notes for next session
+- venv at `.venv/`; run tests: `./.venv/Scripts/python -m pytest -q`.
+- Fixtures are gitignored (scraped content must never be committed); tests skip
+  gracefully when absent — user's real capture lives in `tests/fixtures/`.
+- `upsert_question(..., category_path=...)` — scraper resolves the path once per
+  topic via `build_topic_paths` (cached in `Harvester._topic_paths`).
+

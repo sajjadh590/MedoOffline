@@ -203,16 +203,24 @@
     <h1 class="book-title">{{ title }}</h1>
     <div class="book-meta">
       بانک سوالات تخصصی پزشکی — نسخه آفلاین | تعداد سوالات: {{ questions|length }}
+      {% if partial %} | <span style="color:#c05621;">نسخه ناقص — بخشی از مباحث هنوز دریافت نشده است</span>{% endif %}
     </div>
   </div>
 
   <!-- بخش اول: متن سوالات -->
   <div class="section-title">بخش اول: سوالات چهار گزینه‌ای</div>
 
-  {% for q in questions %}
+  {% for sec in sections %}
+  {% if sec.path %}
+  <div class="section-title" style="font-size: 12pt; color:#2b6cb0;">
+    {{ sec.path }}
+    {% if sec.partial %}<span style="color:#c05621; font-size: 9pt;">(ناقص — در حال دریافت)</span>{% endif %}
+  </div>
+  {% endif %}
+  {% for q in sec.questions %}
   <div class="question-card">
     <div class="q-header">
-      <span class="q-number">سوال شماره {{ loop.index }}</span>
+      <span class="q-number">سوال شماره {{ q.book_no if q.book_no else loop.index }}</span>
     </div>
 
     <div class="q-stem">
@@ -229,6 +237,7 @@
       {% endfor %}
     </div>
   </div>
+  {% endfor %}
   {% endfor %}
 
   {% if include_answers %}
@@ -265,10 +274,11 @@
 
   <div class="section-title">بخش سوم: پاسخ‌نامه تشریحی و نکات آموزشی</div>
 
-  {% for q in questions %}
+  {% for sec in sections %}
+  {% for q in sec.questions %}
   <div class="expl-card">
     <div class="expl-title">
-      پاسخ تشریحی سوال {{ loop.index }}:
+      پاسخ تشریحی سوال {{ q.book_no if q.book_no else loop.index }}:
       {% if q.correct_index %}
       {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
       <span class="correct-badge">گزینه صحیح: {{ letters[q.correct_index - 1] }} ({{ q.options[q.correct_index - 1].text }})</span>
@@ -285,6 +295,7 @@
       {% endif %}
     </div>
   </div>
+  {% endfor %}
   {% endfor %}
   {% endif %}
 

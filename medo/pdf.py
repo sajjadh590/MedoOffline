@@ -44,6 +44,8 @@ def render_book_html(
     questions: list[dict],
     title: str = "بانک سوالات پزشکی مدوفست",
     include_answers: bool = True,
+    partial: bool = False,
+    partial_topics: Optional[set[str]] = None,
 ) -> str:
     """Render the Jinja2 book template into standalone HTML."""
     env = Environment(
@@ -51,10 +53,28 @@ def render_book_html(
         autoescape=True,
     )
     template = env.get_template("book.html")
+
+    # Group by category_path so the book can print section headers per topic
+    sections: list[dict] = []
+    by_path: dict[str, list[dict]] = {}
+    for i, q in enumerate(questions, start=1):
+        q["book_no"] = i   # stable global numbering across sections
+        key = q.get("category_path") or ""
+        by_path.setdefault(key, []).append(q)
+    for path, qs in by_path.items():
+        tid = qs[0].get("topic_id")
+        sections.append({
+            "path": path or (f"مبحث {tid}" if tid else ""),
+            "questions": qs,
+            "partial": bool(partial_topics and tid in partial_topics),
+        })
+
     return template.render(
         title=title,
         questions=questions,
+        sections=sections,
         include_answers=include_answers,
+        partial=partial,
     )
 
 
@@ -64,13 +84,18 @@ def export_pdf(
     topic_id: Optional[int] = None,
     title: Optional[str] = None,
     include_answers: bool = True,
+    partial: bool = False,
 ) -> Path:
     """
     Generate a printable PDF test book from the local database.
     Uses Playwright for pixel-perfect RTL rendering.
+
+    partial=True tolerates a half-finished database: topics whose scrape is
+    not 'completed' get a printed marker instead of failing the build.
     """
     from playwright.sync_api import sync_playwright
     from medo.browser import launch_browser
+    from medo.db import get_scrape_state
 
     conn = get_connection(db_path)
     if topic_id is not None:
@@ -79,13 +104,25 @@ def export_pdf(
     else:
         questions = get_all_questions(conn)
         default_title = "بانک جامع سوالات پزشکی"
+
+    partial_topics: set[str] = set()
+    if partial:
+        for q in questions:
+            tid = q.get("topic_id")
+            if tid is None:
+                continue
+            st = get_scrape_state(conn, tid)
+            if not st or st.get("status") != "completed":
+                partial_topics.add(tid)
     conn.close()
 
     if not questions:
         raise ValueError("No questions found in database to export.")
 
     book_title = title or default_title
-    raw_html = render_book_html(questions, title=book_title, include_answers=include_answers)
+    raw_html = render_book_html(
+        questions, title=book_title, include_answers=include_answers,
+        partial=partial, partial_topics=partial_topics)
     final_html = _embed_local_images(raw_html, Path.cwd())
 
     out_file = Path(output_path)
