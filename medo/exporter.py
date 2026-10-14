@@ -75,11 +75,21 @@ def export_web_bundle(
     )
     (out_dir / "categories.json").write_text(tree_json, encoding="utf-8")
 
-    # 3. Copy web assets (HTML, CSS, JS)
-    for fname in ("style.css", "app.js"):
+    # 3. Copy web assets (HTML, CSS, JS, PWA files)
+    for fname in ("style.css", "app.js", "manifest.json", "sw.js"):
         src = WEB_DIR / fname
         if src.is_file():
             shutil.copy2(src, out_dir / fname)
+
+    # Bundled font + icons (keeps the export 100% offline — no CDN)
+    for dirname in ("fonts", "icons"):
+        src_dir = WEB_DIR / dirname
+        if src_dir.is_dir():
+            dest_dir = out_dir / dirname
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for item in src_dir.iterdir():
+                if item.is_file():
+                    shutil.copy2(item, dest_dir / item.name)
 
     # Copy and adapt index.html to load data before app.js
     html_src = WEB_DIR / "index.html"

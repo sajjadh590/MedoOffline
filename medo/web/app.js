@@ -25,6 +25,8 @@
     activeFilter: 'all', // 'all' | 'answered' | 'bookmarked'
     searchQuery: '',
     theme: localStorage.getItem('medo_theme') || 'theme-dark',
+    tree: [],            // category hierarchy from MEDO_TREE / categories.json / /api/tree
+    topicFilter: null,   // topic_id when a tree topic is selected
   };
 
   // --- DOM Elements ---
@@ -52,6 +54,11 @@
     paletteSidebar: document.getElementById('paletteSidebar'),
     paletteToggleBtn: document.getElementById('paletteToggleBtn'),
     themeToggleBtn: document.getElementById('themeToggleBtn'),
+    treeToggleBtn: document.getElementById('treeToggleBtn'),
+    treeSidebar: document.getElementById('treeSidebar'),
+    treeScroll: document.getElementById('treeScroll'),
+    treeClearBtn: document.getElementById('treeClearBtn'),
+    breadcrumbBar: document.getElementById('breadcrumbBar'),
     imageModal: document.getElementById('imageModal'),
     modalImage: document.getElementById('modalImage'),
     modalBackdrop: document.getElementById('modalBackdrop'),
@@ -81,6 +88,7 @@
     applyTheme(state.theme);
     loadSavedUserSession();
     bindEvents();
+    loadTree();
     await loadQuestions();
   }
 
@@ -146,6 +154,9 @@
       if (state.activeFilter === 'answered' && !(qid in state.userAnswers)) return false;
       if (state.activeFilter === 'bookmarked' && !state.bookmarks.has(qid)) return false;
 
+      // Tree topic filter
+      if (state.topicFilter !== null && String(item.topic_id) !== String(state.topicFilter)) return false;
+
       // Search query
       if (q) {
         const text = (item.stem_text || '') + ' ' + (item.explanation_text || '') + ' ' + (item.options || []).map(o => o.text).join(' ');
@@ -183,7 +194,11 @@
     const answeredOption = state.userAnswers[qid];
 
     // Meta badges
-    elements.topicBadge.textContent = q.topic_id ? `مبحث ${toPersianDigits(q.topic_id)}` : 'بانک سوالات';
+    const pathParts = (q.category_path || '').split('»').map(s => s.trim()).filter(Boolean);
+    elements.topicBadge.textContent = pathParts.length
+      ? pathParts[pathParts.length - 1]
+      : (q.topic_id ? `مبحث ${toPersianDigits(q.topic_id)}` : 'بانک سوالات');
+    renderBreadcrumb(pathParts);
     elements.indexBadge.textContent = `سوال ${toPersianDigits(state.currentIndex + 1)} از ${toPersianDigits(state.filteredIndices.length)}`;
     
     // Bookmark status
@@ -369,6 +384,165 @@
     elements.scoreStat.textContent = toPersianDigits(accuracy) + '٪';
   }
 
+  // --- Category Tree ---
+  async function loadTree() {
+    let tree = Array.isArray(window.MEDO_TREE) ? window.MEDO_TREE : null;
+
+    if (!tree) {
+      try {
+        const resp = await fetch('categories.json');
+        if (resp.ok) tree = await resp.json();
+      } catch (e) { /* file:// or absent */ }
+    }
+    if (!tree) {
+      try {
+        const resp = await fetch('/api/tree');
+        if (resp.ok) tree = await resp.json();
+      } catch (e) { /* static bundle */ }
+    }
+
+    if (Array.isArray(tree) && tree.length > 0) {
+      state.tree = tree;
+      renderTree();
+      if (window.innerWidth >= 1280) elements.treeSidebar.classList.add('open');
+    } else {
+      elements.treeToggleBtn.style.display = 'none';
+      elements.treeSidebar.classList.remove('open');
+    }
+  }
+
+  function topicIdOf(node) {
+    const m = /topic-id-(\d+)/.exec(node.source_url || '');
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function renderTree() {
+    const host = elements.treeScroll;
+    host.innerHTML = '';
+    if (!state.tree.length) {
+      host.innerHTML = '<p class="tree-empty">درخت دسته‌بندی هنوز استخراج نشده است.<br>دستور <code>medo discover</code> را اجرا کنید.</p>';
+      return;
+    }
+    state.tree.forEach(node => host.appendChild(buildTreeNode(node, 0)));
+  }
+
+  function buildTreeNode(node, depth) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tree-node';
+    const kids = node.children || [];
+    const tid = topicIdOf(node);
+    const isTopic = (node.kind === 'topic') || tid !== null;
+    // Deeper levels start collapsed so the tree stays compact
+    if (kids.length > 0 && depth >= 1) wrap.classList.add('collapsed');
+
+    const row = document.createElement('button');
+    row.className = 'tree-row';
+    if (isTopic && state.topicFilter !== null && String(tid) === String(state.topicFilter)) {
+      row.classList.add('active');
+    }
+
+    if (kids.length > 0) {
+      const chev = document.createElement('span');
+      chev.className = 'tree-chevron';
+      chev.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>';
+      row.appendChild(chev);
+    }
+
+    const title = document.createElement('span');
+    title.className = 'tree-node-title';
+    title.textContent = node.title || '(بدون عنوان)';
+    row.appendChild(title);
+
+    const prog = node.progress || {};
+    if (isTopic) {
+      if (node.partial || (prog.status && prog.status !== 'completed' && prog.scraped > 0)) {
+        const badge = document.createElement('span');
+        badge.className = 'tree-badge-partial';
+        badge.textContent = 'ناقص';
+        row.appendChild(badge);
+      } else if (prog.status === 'completed') {
+        const done = document.createElement('span');
+        done.className = 'tree-badge-done';
+        done.textContent = '✓';
+        row.appendChild(done);
+      }
+      if (prog.declared > 0 || prog.scraped > 0) {
+        const count = document.createElement('span');
+        count.className = 'tree-count';
+        count.textContent = toPersianDigits(prog.scraped || 0) + '/' + toPersianDigits(prog.declared || 0);
+        row.appendChild(count);
+      }
+    } else if (node.question_count > 0) {
+      const count = document.createElement('span');
+      count.className = 'tree-count';
+      count.textContent = toPersianDigits(node.question_count);
+      row.appendChild(count);
+    }
+
+    row.addEventListener('click', () => {
+      if (isTopic && tid !== null) {
+        setTopicFilter(tid === state.topicFilter ? null : tid);
+      } else if (kids.length > 0) {
+        wrap.classList.toggle('collapsed');
+      }
+    });
+    wrap.appendChild(row);
+
+    // Thin progress bar under topic rows (scraped / declared)
+    if (isTopic && prog.declared > 0) {
+      const bar = document.createElement('div');
+      bar.className = 'tree-progress';
+      const fill = document.createElement('div');
+      fill.className = 'tree-progress-fill' + (prog.status === 'completed' ? ' done' : '');
+      fill.style.width = Math.min(100, Math.round(((prog.scraped || 0) / prog.declared) * 100)) + '%';
+      bar.appendChild(fill);
+      wrap.appendChild(bar);
+    }
+
+    if (kids.length > 0) {
+      const childBox = document.createElement('div');
+      childBox.className = 'tree-children';
+      kids.forEach(k => childBox.appendChild(buildTreeNode(k, depth + 1)));
+      wrap.appendChild(childBox);
+    }
+    return wrap;
+  }
+
+  function setTopicFilter(tid) {
+    state.topicFilter = tid;
+    elements.treeClearBtn.hidden = tid === null;
+    renderTree();
+    applyFilter();
+    state.currentIndex = 0;
+    renderCurrentQuestion();
+    updateStats();
+  }
+
+  // --- Breadcrumb ---
+  function renderBreadcrumb(pathParts) {
+    const bar = elements.breadcrumbBar;
+    if (!bar) return;
+    if (!pathParts || pathParts.length === 0) {
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+    bar.style.display = 'flex';
+    bar.innerHTML = '';
+    pathParts.forEach((part, idx) => {
+      if (idx > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'crumb-sep';
+        sep.textContent = '»';
+        bar.appendChild(sep);
+      }
+      const crumb = document.createElement('span');
+      crumb.className = idx === pathParts.length - 1 ? 'crumb-topic' : 'crumb';
+      crumb.textContent = part;
+      bar.appendChild(crumb);
+    });
+  }
+
   // --- Lightbox Modal ---
   function openImageModal(src) {
     elements.modalImage.src = src;
@@ -451,6 +625,12 @@
       const isHidden = elements.paletteSidebar.style.display === 'none';
       elements.paletteSidebar.style.display = isHidden ? 'flex' : 'none';
     });
+
+    // Category tree toggle & filter clear
+    elements.treeToggleBtn.addEventListener('click', () => {
+      elements.treeSidebar.classList.toggle('open');
+    });
+    elements.treeClearBtn.addEventListener('click', () => setTopicFilter(null));
 
     // Modal Close
     elements.modalCloseBtn.addEventListener('click', closeImageModal);

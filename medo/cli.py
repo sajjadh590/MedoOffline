@@ -150,15 +150,15 @@ def _print_partial_note(db_path: Path) -> None:
     except Exception:
         return
     partial = [u for u, s in prog.items()
-               if s["status"] not in {"completed"} and s["scraped"] > 0]
-    never = [u for u, s in prog.items() if s["scraped"] == 0]
+               if "topic-id-" in u and s["status"] not in {"completed"} and s["scraped"] > 0]
+    never = [u for u, s in prog.items() if "topic-id-" in u and s["scraped"] == 0]
     if partial:
         console.print(f"[yellow][!] Partial build — {len(partial)} topic(s) still in progress, marked as partial.[/yellow]")
     if never:
         console.print(f"[yellow][i] {len(never)} topic(s) not scraped yet — skipped.[/yellow]")
 
 
-@app.command(name="build-pdf", aliases=["export-pdf"])
+@app.command(name="build-pdf")
 def export_pdf_cmd(
     output: Path = typer.Option(Path("medo_test_book.pdf"), "--output", "-o", help="Output PDF file path"),
     topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Filter by specific topic ID"),
@@ -190,7 +190,11 @@ def export_pdf_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command(name="build-web", aliases=["export-web"])
+# Old command names kept as aliases (typer has no `aliases=` kwarg; register twice)
+app.command(name="export-pdf")(export_pdf_cmd)
+
+
+@app.command(name="build-web")
 def export_web_cmd(
     output_dir: Path = typer.Option(Path("dist"), "--output", "-o", help="Output directory"),
     topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Filter by specific topic ID"),
@@ -208,6 +212,9 @@ def export_web_cmd(
     console.print(f"[bold green][+] Web bundle exported to {out_dir}. Double-click index.html to view.[/bold green]")
     if partial:
         _print_partial_note(db_path)
+
+
+app.command(name="export-web")(export_web_cmd)
 
 
 @app.command()

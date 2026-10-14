@@ -137,6 +137,27 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(stats)
             return
 
+        if parsed.path == "/api/tree":
+            from medo.db import get_category_progress, get_category_tree
+
+            conn = get_connection(self.db_path)
+            tree = get_category_tree(conn)
+            progress = get_category_progress(conn)
+            conn.close()
+
+            def _decorate(nodes: list[dict]) -> list[dict]:
+                for n in nodes:
+                    n["progress"] = progress.get(n["source_url"], {})
+                    n["partial"] = bool(
+                        n["progress"].get("status") not in {"completed"}
+                        and n["progress"].get("scraped", 0) > 0
+                    )
+                    _decorate(n.get("children", []))
+                return nodes
+
+            self._send_json(_decorate(tree))
+            return
+
         if parsed.path == "/api/auth-status":
             self._send_json({
                 "authenticated": has_storage_state(),

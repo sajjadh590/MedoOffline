@@ -330,24 +330,38 @@ python -m medo.cli import-fixtures
 
 ### Open issues / next steps (in priority order)
 
-1. **Web UI tree + breadcrumb not rendered yet** — `medo/web/index.html` still
-   loads Google Fonts (violates offline/PWA requirement) and `app.js` doesn't
-   render `window.MEDO_TREE` (collapsible tree, breadcrumb, per-node progress).
-   Exporter already emits the data; UI work pending. Also no PWA
-   manifest/service-worker yet.
-2. **Vazirmatn font not bundled locally** — needed for offline + PDF.
-3. **`.github/workflows/scrape.yml` not written yet** (dir exists, empty).
-   Spec: workflow_dispatch + optional cron, 330-min batches, restore/upload
-   `data/` artifact, IP-block guard abort with clear message.
+1. ~~Web UI tree + breadcrumb not rendered yet~~ — **done 2026-10-14**.
+   Collapsible tree drawer (navbar button, auto-opens ≥1280px) renders
+   `window.MEDO_TREE` / `categories.json` / `/api/tree` with per-node progress,
+   «ناقص»/✓ badges and topic-click filtering; question card shows the full
+   `category_path` breadcrumb.
+2. ~~Vazirmatn font not bundled locally~~ — **done 2026-10-14**: 5 weights
+   (~255 KB woff2) in `medo/web/fonts/` + `@font-face`; Google Fonts CDN links
+   removed from `index.html`. PWA: `manifest.json`, `sw.js` (cache-first shell +
+   runtime caching, registered only over http(s)), Pillow-generated icons.
+3. ~~`.github/workflows/scrape.yml` missing~~ — **done 2026-10-14**: manual
+   dispatch (topic + max-minutes inputs), commented-out cron, refuses to run
+   without the `MEDO_STORAGE_STATE` secret (never committed), cache/restore of
+   db+assets (session excluded from cache & artifact), IP-block/captcha guard
+   fails the job with a clear message.
 4. **Live pagination still unverified** — earlier probe got 403 without a
    login session (`scripts/probe_live.py`). First real run should start small:
    `medo login`, then `medo scrape --topic 79 --max 5` and watch it.
    The `?page=N` assumption is defensive but unconfirmed.
-5. **Server (`medo serve`)** doesn't expose the category tree/progress API yet
-   (static web UI shares the same gap as #1).
-6. Tests for new helpers (extract_menu_links, refresh_question_paths,
-   get_category_progress, build-web --partial) not added yet — manual checks
-   above all passed.
+5. ~~Server doesn't expose the category tree/progress API~~ — **done
+   2026-10-14**: `GET /api/tree` returns the decorated tree (same shape as the
+   export).
+6. ~~Tests for new helpers missing~~ — **done 2026-10-14**: `tests/test_cli_app.py`
+   (command + alias registration, scrape target validation) and
+   `tests/test_web_export.py` (offline guarantees — no external URLs in
+   html/css, bundled font magic bytes, tree/progress/partial export,
+   refresh_question_paths, get_category_progress, extract_menu_links).
+   Suite: 73/73.
+7. **CLI alias bug fixed 2026-10-14** — typer 0.27 has no `aliases=` kwarg;
+   `export-pdf`/`export-web` are now second registrations of the same
+   callbacks (both names listed in `--help`).
+8. **`_print_partial_note` counted non-topic nodes** as "topics" — fixed to
+   only count `topic-id-` URLs.
 
 ### Notes for next session
 - venv at `.venv/`; run tests: `./.venv/Scripts/python -m pytest -q`.
