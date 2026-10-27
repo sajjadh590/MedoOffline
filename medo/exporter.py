@@ -17,16 +17,17 @@ from medo.db import (
     get_connection,
     get_questions_by_topic,
 )
+from medo.paths import DEFAULT_ASSETS_DIR, DIST_DIR
 
 WEB_DIR = Path(__file__).parent / "web"
-DEFAULT_DIST_DIR = Path("dist")
+DEFAULT_DIST_DIR = DIST_DIR
 
 
 def export_web_bundle(
     output_dir: Path | str = DEFAULT_DIST_DIR,
     db_path: Path | str = DEFAULT_DB_PATH,
     topic_id: Optional[int] = None,
-    assets_dir: Path | str = Path("data/assets"),
+    assets_dir: Path | str = DEFAULT_ASSETS_DIR,
     partial: bool = False,
 ) -> Path:
     """
@@ -82,7 +83,7 @@ def export_web_bundle(
             shutil.copy2(src, out_dir / fname)
 
     # Bundled font + icons (keeps the export 100% offline — no CDN)
-    for dirname in ("fonts", "icons"):
+    for dirname in ("fonts", "icons", "vendor"):
         src_dir = WEB_DIR / dirname
         if src_dir.is_dir():
             dest_dir = out_dir / dirname

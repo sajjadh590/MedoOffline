@@ -16,12 +16,96 @@ from pathlib import Path
 import pytest
 
 from medo.models import AnswerSource, ExplanationStatus
-from medo.parser import extract_html_from_mhtml, parse_mhtml_file, parse_question_html
+from medo.parser import (
+    extract_html_from_mhtml,
+    is_site_widget_text,
+    is_valid_stem_text,
+    parse_mhtml_file,
+    parse_question_html,
+)
 from medo.text_utils import normalize_single_line, strip_invisible
 
 FIXTURES = Path(__file__).parent / "fixtures"
 BEFORE   = FIXTURES / "before.mhtml"
 AFTER    = FIXTURES / "after.mhtml"
+
+# Real page captured from the live site (kept out of the fixtures repo on purpose).
+REAL_CAPTURE = Path(__file__).resolve().parents[1] / "data" / "_real.html"
+
+# ---------------------------------------------------------------------------
+# Live-page shapes
+#
+# Until the site's reveal-JS decrypts the stem, the only readable paragraphs on
+# the page belong to the login/statistics widget.  A previous version accepted
+# any non-empty stem, so that widget was stored as the question.
+# ---------------------------------------------------------------------------
+
+_WIDGET_BLOCK = """
+  <div class="col-12">
+    <div class="mb-1" id="strt">
+      <h6 id="statistics-title" class="mt-1 mb-3 mx-2">
+        سابقه عملکرد شما در این تست:
+      </h6>
+      <div class="row">
+        <div class="col-6">
+          <ul class="single-list-inner">
+            <li><mark></mark>  پاسخدهی: <span class="blurrynumber">?</span> بار</li>
+            <li><mark></mark>  پاسخ صحیح:<span class="blurrynumber">?</span> بار</li>
+          </ul>
+        </div>
+      </div>
+      <p>
+        برای فعال شدن محاسبه هوشمند آیتم های بالا برای شما به صورت رایگان،
+        نیاز است با زدن دکمه زیر، لاگین شوید:
+      </p>
+      <p>لاگین سریع و بازگشت به همین سوال</p>
+    </div>
+  </div>
+"""
+
+# The widget without its stable id — the text gate alone has to reject it.
+_WIDGET_BLOCK_NO_ID = _WIDGET_BLOCK.replace(' id="strt"', "")
+
+_ENCRYPTED_STEM = """
+  <div class="encrypted-question" data-encrypted-text="UXCZXiigBUpTnHVZOr+7Ww=="></div>
+"""
+
+_REVEALED_STEM = """
+  <div class="XIuIC5IL WDz4s9Kg" inert="">
+    <p inert=""><span inert="" data-i2al1s3vi93="ZGl2LktHdXRxYUVtIHsgZGlzcGxheTogYmxvY2sgIWltcG9ydGFudDs=">
+      خانم ۵۵ ساله ای با سابقه یک ساله دیابت تیپ دو که تحت درمان با متفورمین ۲ گرم، در روز می باشد.
+    </span></p>
+    <p>جهت کنترل قندخون و کاهش خطر بیماری های قلبی عروقی، کدام دارو مناسب است؟</p>
+  </div>
+"""
+
+
+
+def _live_page(stem_block: str, widget: str = _WIDGET_BLOCK) -> str:
+    """Minimal replica of the live question page (chrome before the question)."""
+    return f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl"><head><meta charset="UTF-8"><title>topic</title></head>
+<body>
+<style>
+  div.kQ1x9 {{ display: block !important; }}
+  div.dec0y {{ display: none !important; left: -9999px !important; }}
+</style>
+<div class="row">
+{widget}
+</div>
+<div class="questionContentWrapper" id="questionContentWrapper">
+  <div class="questions-container" id="questions-container">
+    <div class="qtext-before mb-3" id="qtxt" inert="">
+{stem_block}
+    </div>
+    <div id="options-wrap">
+      <label id="label1" inert=""><span data-encoded-text="2KfZhtmF2Ygg2YjZiNix24zYr9uM"></span></label>
+      <label id="label2" inert=""><span data-encoded-text="2YHZiNix2YjYs9mF2KfbjNiv"></span></label>
+    </div>
+    <div id="block-b"><span>تایید گزینه 1</span></div>
+  </div>
+</div>
+</body></html>"""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -236,6 +320,64 @@ class TestBeforeFixture:
 # After-submit fixture
 # ---------------------------------------------------------------------------
 
+class TestAnswerRecovery:
+    """Answers must be recovered from every shape the site uses — and never
+    invented from a sentence that says an option is wrong."""
+
+    @staticmethod
+    def _page(block_b: str, label_class: str = "") -> str:
+        page = _live_page(stem_block=_REVEALED_STEM)
+        page = page.replace(
+            '<div id="block-b"><span>تایید گزینه 1</span></div>', block_b)
+        if label_class:
+            page = page.replace(
+                '<label id="label1" inert="">',
+                f'<label id="label1" inert="" class="{label_class}">')
+        return page
+
+    def test_persian_digit_marker(self):
+        q = parse_question_html(
+            self._page('<div id="block-b"><span>تایید گزینه ۲</span></div>'),
+            submitted=True)
+        assert q.correct_index == 2
+        assert q.answer_source == AnswerSource.MARKER
+
+    def test_spelled_out_answer_sentence(self):
+        q = parse_question_html(
+            self._page('<div id="block-b"><span>پاسخ صحیح: گزینهٔ ۲ است</span></div>'),
+            submitted=True)
+        assert q.correct_index == 2
+
+    def test_explicit_correct_sentence(self):
+        q = parse_question_html(
+            self._page('<div id="block-b"><span>در این سوال گزینه ۱ صحیح است</span></div>'),
+            submitted=True)
+        assert q.correct_index == 1
+
+    def test_wrong_option_sentence_is_not_an_answer(self):
+        q = parse_question_html(
+            self._page('<div id="block-b"><span>گزینه ۲ نادرست است</span></div>'),
+            submitted=True)
+        assert q.correct_index is None
+
+    def test_class_marked_option(self):
+        q = parse_question_html(
+            self._page('<div id="block-b"></div>',
+                       label_class='option-row is-correct'),
+            submitted=True)
+        assert q.correct_index == 1
+        assert q.answer_source == AnswerSource.COLOR
+
+    def test_two_marked_options_are_not_trusted(self):
+        page = self._page('<div id="block-b"></div>')
+        page = page.replace('<label id="label1" inert="">',
+                            '<label id="label1" inert="" class="correct">')
+        page = page.replace('<label id="label2" inert="">',
+                            '<label id="label2" inert="" class="correct">')
+        q = parse_question_html(page, submitted=True)
+        assert q.correct_index is None
+
+
 class TestAfterFixture:
     @pytest.fixture(scope="class")
     @classmethod
@@ -259,6 +401,86 @@ class TestAfterFixture:
 
     def test_option_3_still_sglt2(self, q):
         assert "SGLT2" in q.options[2].text
+
+
+# ---------------------------------------------------------------------------
+# Site chrome must never become a question stem
+# ---------------------------------------------------------------------------
+
+class TestSiteChromeIsNeverTheStem:
+    def test_widget_text_is_recognised(self):
+        assert is_site_widget_text("سابقه عملکرد شما در این تست: پاسخدهی: ? بار")
+        assert is_site_widget_text("لاگین سریع و بازگشت به همین سوال")
+        assert not is_site_widget_text("جهت کنترل قندخون کدام دارو مناسب است؟")
+
+    def test_invalid_stem_text(self):
+        assert is_valid_stem_text("کدام دارو مناسب است؟")
+        assert not is_valid_stem_text("")
+        assert not is_valid_stem_text("اب")
+        assert not is_valid_stem_text("لاگین سریع و بازگشت به همین سوال")
+        # navigation labels are short and must not pass the length floor
+        assert not is_valid_stem_text("پنل کاربری")
+
+    def test_login_page_is_not_a_stem(self):
+        """The site's SMS login page is served as an anti-bot redirect."""
+        login_page = (
+            '<!DOCTYPE html><html lang="fa"><body>'
+            '<div id="app"><h1>ورود</h1>'
+            '<p>یک کد تایید به شما پیامک خواهد شد</p>'
+            '<p>قوانین و سیاست حریم خصوصی را می‌پذیرم</p>'
+            '<button>ارسال کد</button></div>'
+            "</body></html>"
+        )
+        assert is_site_widget_text("یک کد تایید به شما پیامک خواهد شد")
+        assert not is_valid_stem_text("ورود\n\n یک کد تایید به شما پیامک خواهد شد")
+        assert parse_question_html(login_page).stem_text == ""
+
+    def test_redirect_shell_is_not_a_stem(self):
+        shell = ('<!DOCTYPE html><html lang="fa"><body>'
+                 '<p>در حال انتقال به سایت مورد نظر هستید...</p>'
+                 "</body></html>")
+        assert parse_question_html(shell).stem_text == ""
+
+    def test_nav_chrome_inside_question_container_is_not_a_stem(self):
+        """Chrome rendered inside the live containers must not win either."""
+        page = _live_page(stem_block=_ENCRYPTED_STEM).replace(
+            '<div class="qtext-before mb-3" id="qtxt" inert="">',
+            '<div class="page-head"><p>پنل کاربری</p></div>\n'
+            '    <div class="cta"><p>بانک سوالات</p></div>\n'
+            '    <div class="qtext-before mb-3" id="qtxt" inert="">',
+        )
+        q = parse_question_html(page)
+        assert q.stem_text == "", f"chrome leaked into stem: {q.stem_text!r}"
+
+    def test_widget_only_page_has_no_stem(self):
+        """Stem not revealed yet → empty stem so the harvester keeps waiting."""
+        q = parse_question_html(_live_page(stem_block=_ENCRYPTED_STEM))
+        assert q.stem_text == "", f"widget leaked into stem: {q.stem_text[:80]!r}"
+
+    def test_widget_without_id_has_no_stem(self):
+        q = parse_question_html(_live_page(stem_block=_ENCRYPTED_STEM,
+                                           widget=_WIDGET_BLOCK_NO_ID))
+        assert q.stem_text == ""
+
+    def test_widget_never_wins_over_revealed_stem(self):
+        q = parse_question_html(_live_page(stem_block=_ENCRYPTED_STEM + _REVEALED_STEM))
+        assert "خانم ۵۵ ساله" in q.stem_text
+        assert "سابقه عملکرد شما" not in q.stem_text
+        assert "لاگین" not in q.stem_text
+
+    def test_stem_keeps_every_sentence(self):
+        """The whole stem, not just its first <p>."""
+        q = parse_question_html(_live_page(stem_block=_ENCRYPTED_STEM + _REVEALED_STEM))
+        assert q.stem_text.endswith("کدام دارو مناسب است؟")
+        assert "متفورمین" in q.stem_text
+
+    @pytest.mark.skipif(not REAL_CAPTURE.is_file(),
+                        reason="real live capture not present (data/_real.html)")
+    def test_real_capture_stem_is_the_question(self):
+        q = parse_question_html(REAL_CAPTURE.read_text(encoding="utf-8", errors="replace"))
+        assert "سابقه عملکرد شما" not in q.stem_text
+        assert len(q.stem_text) > 100
+        assert len(q.options) >= 2
 
 
 # ---------------------------------------------------------------------------

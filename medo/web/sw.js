@@ -1,22 +1,23 @@
-/* MedoOffline service worker — cache-first shell, runtime caching for data.
-   Registered only over http(s); file:// bundles skip it (see index.html). */
+/* MedoOffline service worker.
 
-const CACHE_NAME = 'medo-shell-v1';
-const SHELL = [
-  './',
-  './index.html',
-  './style.css',
-  './app.js',
-  './manifest.json',
-];
+   Registered only over http(s); file:// bundles skip it (see index.html).
+
+   Caching rules:
+     * Only immutable assets (fonts, icons, images) are cached.
+     * Everything else — the app shell and every /api or .json response — is
+       fetched from the network on each request.  This app is local-first:
+       the archive changes every time the harvester runs, and a cached shell
+       once made the browser show an old app.js and old questions after a
+       restart, which is far worse than losing offline start-up.
+*/
+
+const CACHE_NAME = 'medo-assets-v3';
+
+const isImmutableAsset = (url) =>
+  /\.(woff2?|ttf|otf|png|jpe?g|webp|svg|ico)$/i.test(url.pathname);
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL))
-      .catch(() => {})
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener('activate', (event) => {
@@ -35,18 +36,15 @@ self.addEventListener('fetch', (event) => {
   let url;
   try { url = new URL(req.url); } catch (e) { return; }
   if (url.origin !== self.location.origin) return;
+  if (!isImmutableAsset(url)) return;  // browser default: always the network
 
   event.respondWith(
-    caches.match(req).then((cached) => {
-      const network = fetch(req).then((res) => {
-        // Runtime-cache successful same-origin responses (questions, fonts, images)
-        if (res && res.status === 200 && res.type === 'basic') {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
-        }
-        return res;
-      }).catch(() => cached);
-      return cached || network;
-    })
+    caches.match(req).then((cached) => cached || fetch(req).then((res) => {
+      if (res && res.status === 200 && res.type === 'basic') {
+        const copy = res.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+      }
+      return res;
+    }))
   );
 });

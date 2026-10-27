@@ -11,6 +11,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from medo.paths import (
+    DEFAULT_DB_PATH,
+    DEFAULT_STORAGE_STATE,
+    DIST_DIR,
+    PROJECT_ROOT,
+)
+
 # Reconfigure stdout/stderr to UTF-8 on Windows to safely print Persian characters and filenames
 if sys.platform == "win32":
     try:
@@ -30,7 +37,7 @@ console = Console(safe_box=True)
 @app.command()
 def login(
     storage_state: Path = typer.Option(
-        Path("data/storage_state.json"),
+        DEFAULT_STORAGE_STATE,
         "--state",
         "-s",
         help="Path where session storage_state.json is saved",
@@ -57,7 +64,7 @@ def scrape(
     delay_max: float = typer.Option(3.0, "--delay-max", help="Maximum uniform random delay in seconds"),
     headless: bool = typer.Option(True, "--headless/--no-headless", help="Run browser in headless mode"),
     storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path (default: data/storage_state.json or $MEDO_STORAGE_STATE)"),
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Scrape questions politely: 1 request at a time, random delay 1.5-3 s,
@@ -109,20 +116,23 @@ def scrape(
 def discover(
     headless: bool = typer.Option(True, "--headless/--no-headless"),
     storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path"),
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
-    Crawl /main-menu once and store the site's exact category tree
+    Crawl /main-menu and its qbank entry pages (/qbank-keshvari,
+    /qbank-talifi, ...) once and store the site's exact category tree
     (category → lesson → section → topic, original titles, order, counts).
     """
     from medo.scraper import discover_hierarchy
 
-    console.print("[bold cyan][*] Discovering category hierarchy from /main-menu...[/bold cyan]")
+    console.print("[bold cyan][*] Discovering category hierarchy from /main-menu "
+                  "+ qbank entry pages...[/bold cyan]")
     summary = discover_hierarchy(
         db_path=db_path, headless=headless, storage_state=storage_state)
     console.print(
         f"[bold green][+] Stored {summary['nodes']} node(s): "
-        f"{summary['categories']} categories, {summary['topics']} topics."
+        f"{summary['categories']} categories, {summary['topics']} topics, "
+        f"{summary.get('micro_topics', 0)} micro-topics."
         f"[/bold green]"
     )
 
@@ -130,7 +140,7 @@ def discover(
 @app.command()
 def serve(
     port: int = typer.Option(8080, "--port", "-p", help="Port to listen on"),
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Start local offline web server for interactive question practice.
@@ -145,7 +155,10 @@ def _print_partial_note(db_path: Path) -> None:
 
     try:
         conn = get_connection(db_path)
-        prog = get_category_progress(conn)
+        # Micro-topics (?tag=) share their parent's progress row; counting
+        # them here would report ~2,400 "topics" for a 150-topic tree.
+        prog = {url: state for url, state in get_category_progress(conn).items()
+                if "?tag=" not in url}
         conn.close()
     except Exception:
         return
@@ -165,7 +178,7 @@ def export_pdf_cmd(
     title: Optional[str] = typer.Option(None, "--title", help="Custom title for test book"),
     include_answers: bool = typer.Option(True, "--answers/--no-answers", help="Include answer key and explanations"),
     partial: bool = typer.Option(False, "--partial", help="Allow building from a half-finished database (incomplete topics marked)"),
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Generate a printable PDF test book with Persian RTL formatting.
@@ -196,10 +209,10 @@ app.command(name="export-pdf")(export_pdf_cmd)
 
 @app.command(name="build-web")
 def export_web_cmd(
-    output_dir: Path = typer.Option(Path("dist"), "--output", "-o", help="Output directory"),
+    output_dir: Path = typer.Option(DIST_DIR, "--output", "-o", help="Output directory"),
     topic: Optional[int] = typer.Option(None, "--topic", "-t", help="Filter by specific topic ID"),
     partial: bool = typer.Option(False, "--partial", help="Allow building from a half-finished database (incomplete topics marked)"),
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Export self-contained static web bundle to run without Python or server.
@@ -217,9 +230,54 @@ def export_web_cmd(
 app.command(name="export-web")(export_web_cmd)
 
 
+@app.command(name="build-bank")
+def export_android_cmd(
+    output: Path = typer.Option(DIST_DIR / "medo.medo", "--output", "-o", help="Output .medo file"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+):
+    """
+    Package the archive for the Android app (USB copy or system file picker).
+    """
+    from medo.share import write_bundle
+
+    out = write_bundle(output, db_path=db_path)
+    size = out.stat().st_size / 1048576
+    console.print(f"[bold green][+] Android bank written: {out} ({size:.1f} MB)[/bold green]")
+    console.print("[dim]Copy it to the phone, then: home screen -> دریافت بانک -> انتخاب فایل[/dim]")
+
+
+app.command(name="export-android")(export_android_cmd)
+
+
+@app.command()
+def share(
+    port: int = typer.Option(8765, "--port", "-p", help="Port to listen on"),
+    bind: str = typer.Option("0.0.0.0", "--bind", help="Interface (0.0.0.0 = reachable on the LAN)"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+):
+    """
+    Serve the Android bank over Wi-Fi (or USB with adb reverse). Read-only.
+    """
+    from medo.share import share_urls, start_share
+
+    httpd = start_share(db_path=db_path, port=port, bind=bind)
+    console.print("[bold cyan][*] Android bank ready for import[/bold cyan]")
+    console.print("    Open the app: دریافت بانک ← دریافت از وای‌فای, then enter one of:")
+    for url in share_urls(port):
+        console.print(f"      [bold]{url}[/bold]")
+    console.print(f"[dim]USB instead: adb reverse tcp:{port} tcp:{port}  ->  http://127.0.0.1:{port}[/dim]")
+    console.print("[dim]Ctrl+C to stop[/dim]")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        console.print("[yellow][-] share server stopped[/yellow]")
+    finally:
+        httpd.server_close()
+
+
 @app.command()
 def stats(
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Display summary statistics of scraped questions and database health.
@@ -249,7 +307,7 @@ def stats(
 
 @app.command()
 def verify(
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Verify integrity of questions database (duplicates, missing answers, format checks).
@@ -281,7 +339,7 @@ def verify(
 
 @app.command(name="import-fixtures")
 def import_fixtures_cmd(
-    db_path: Path = typer.Option(Path("data/medo.db"), "--db", help="SQLite database path"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
 ):
     """
     Import synthetic or captured MHTML fixtures into the database.
@@ -292,7 +350,7 @@ def import_fixtures_cmd(
     conn = get_connection(db_path)
     init_db(conn)
 
-    fixture_dir = Path("tests/fixtures")
+    fixture_dir = PROJECT_ROOT / "tests" / "fixtures"
     imported = 0
     for mhtml_file in fixture_dir.glob("*.mhtml"):
         console.print(f"[*] Importing {mhtml_file.name}...")

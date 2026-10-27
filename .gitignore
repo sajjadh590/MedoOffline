@@ -29,6 +29,9 @@ venv/
 env/
 pip-wheel-metadata/
 
+# ---- local logs (timestamped activity log) ----
+logs/
+
 # ---- pytest / coverage ----
 .pytest_cache/
 .coverage
@@ -47,3 +50,12 @@ Thumbs.db
 
 # ---- Node (for any tooling) ----
 node_modules/
+
+# ---- Local Android toolchain (JDK + SDK, ~500 MB binaries) ----
+tools/jdk8/
+tools/sdk/
+tools/dl/
+
+# ---- Android (local debug key) ----
+android/medo-debug.keystore
+android/*.jks

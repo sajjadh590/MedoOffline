@@ -53,6 +53,60 @@
       color: #4a5568;
     }
 
+    /* Table of contents */
+    .toc {
+      page-break-after: always;
+      break-after: page;
+    }
+
+    .toc-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .toc-item {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 5px 2px;
+      border-bottom: 1px dotted #cbd5e0;
+      font-size: 10pt;
+    }
+
+    .toc-no {
+      flex-shrink: 0;
+      min-width: 22px;
+      color: #2b6cb0;
+      font-weight: 700;
+    }
+
+    .toc-path {
+      flex: 1;
+    }
+
+    .toc-count {
+      flex-shrink: 0;
+      font-size: 8.5pt;
+      color: #4a5568;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .toc-total {
+      margin-top: 12px;
+      font-size: 9pt;
+      color: #4a5568;
+    }
+
+    .missing-note {
+      margin: 0 0 18px 0;
+      padding: 8px 12px;
+      border-right: 3px solid #cbd5e0;
+      background: #f7fafc;
+      color: #4a5568;
+      font-size: 9pt;
+    }
+
     /* Section divider */
     .section-title {
       font-size: 14pt;
@@ -137,7 +191,12 @@
       width: 100%;
       border-collapse: collapse;
       margin-bottom: 30px;
-      page-break-inside: avoid;
+      /* A chapter's key can run past one page; keep the header repeating. */
+      page-break-inside: auto;
+    }
+
+    .answer-key-table thead {
+      display: table-header-group;
     }
 
     .answer-key-table th, .answer-key-table td {
@@ -207,13 +266,32 @@
     </div>
   </div>
 
+  {% if toc %}
+  <!-- فهرست مطالب: همان ساختار دسته‌بندی‌های آرشیو -->
+  <div class="toc">
+    <div class="section-title">فهرست مطالب</div>
+    <ol class="toc-list">
+      {% for t in toc %}
+      <li class="toc-item" style="margin-right: {{ t.depth * 14 }}px;">
+        <span class="toc-no">{{ t.no }}.</span>
+        <span class="toc-path">{{ t.path }}</span>
+        <span class="toc-count">{{ t.count }} سوال</span>
+      </li>
+      {% endfor %}
+    </ol>
+    <div class="toc-total">
+      مجموع: {{ questions|length }} سوال در {{ toc|length }} بخش
+    </div>
+  </div>
+  {% endif %}
+
   <!-- بخش اول: متن سوالات -->
   <div class="section-title">بخش اول: سوالات چهار گزینه‌ای</div>
 
   {% for sec in sections %}
   {% if sec.path %}
   <div class="section-title" style="font-size: 12pt; color:#2b6cb0;">
-    {{ sec.path }}
+    {{ sec.no }}. {{ sec.path }}
     {% if sec.partial %}<span style="color:#c05621; font-size: 9pt;">(ناقص — در حال دریافت)</span>{% endif %}
   </div>
   {% endif %}
@@ -238,13 +316,14 @@
     </div>
   </div>
   {% endfor %}
-  {% endfor %}
 
   {% if include_answers %}
-  <!-- بخش دوم: کلید و پاسخنامه تشریحی -->
+  <!-- پاسخ‌نامهٔ همین بخش، بلافاصله بعد از سوالاتش -->
   <div class="page-break"></div>
+  <div class="section-title" style="font-size: 12pt; color: #2b6cb0;">
+    پاسخ‌نامهٔ بخش {{ sec.no }}
+  </div>
 
-  <div class="section-title">بخش دوم: پاسخ‌نامه کلیدی</div>
   <table class="answer-key-table">
     <thead>
       <tr>
@@ -260,11 +339,10 @@
     </thead>
     <tbody>
       {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
-      {% for row in questions | batch(4) %}
-      {% set row_idx = loop.index0 %}
+      {% for row in sec.questions | batch(4) %}
       <tr>
         {% for q in row %}
-        <td>{{ loop.index + (row_idx * 4) }}</td>
+        <td>{{ q.book_no }}</td>
         <td><strong>{{ letters[q.correct_index - 1] if q.correct_index else '—' }}</strong></td>
         {% endfor %}
       </tr>
@@ -272,14 +350,24 @@
     </tbody>
   </table>
 
-  <div class="section-title">بخش سوم: پاسخ‌نامه تشریحی و نکات آموزشی</div>
+  {% if sec.missing_answers %}
+  <div class="missing-note">
+    برای {{ sec.missing_answers }} سوال این بخش پاسخ صحیح در آرشیو ثبت نشده است؛ جای آن در کلید با «—» آمده و در آزمون غلط شمرده نمی‌شود.
+  </div>
+  {% endif %}
 
-  {% for sec in sections %}
+  {% if sec.missing_explanations %}
+  <div class="missing-note">
+    برای {{ sec.missing_explanations }} سوال پاسخ تشریحی ثبت نشده است؛ گزینه صحیح آن‌ها فقط در کلید همین بخش آمده است.
+  </div>
+  {% endif %}
+
   {% for q in sec.questions %}
+  {% if q.explanation_html or q.explanation_text %}
   <div class="expl-card">
     <div class="expl-title">
-      پاسخ تشریحی سوال {{ q.book_no if q.book_no else loop.index }}:
-      {% if q.correct_index %}
+      پاسخ تشریحی سوال {{ q.book_no }}:
+      {% if q.correct_index and q.correct_index <= q.options|length %}
       {% set letters = ['الف', 'ب', 'ج', 'د', 'هـ'] %}
       <span class="correct-badge">گزینه صحیح: {{ letters[q.correct_index - 1] }} ({{ q.options[q.correct_index - 1].text }})</span>
       {% endif %}
@@ -288,16 +376,15 @@
     <div class="expl-content">
       {% if q.explanation_html %}
         {{ q.explanation_html | safe }}
-      {% elif q.explanation_text %}
-        <p>{{ q.explanation_text }}</p>
       {% else %}
-        <p style="color: #a0aec0;">توضیحات تشریحی ثبت نشده است.</p>
+        <p>{{ q.explanation_text }}</p>
       {% endif %}
     </div>
   </div>
-  {% endfor %}
+  {% endif %}
   {% endfor %}
   {% endif %}
+  {% endfor %}
 
 </body>
 </html>

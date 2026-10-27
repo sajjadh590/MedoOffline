@@ -12,7 +12,7 @@ from typing import Optional
 import httpx
 from PIL import Image
 
-DEFAULT_ASSETS_DIR = Path("data/assets")
+from medo.paths import DEFAULT_ASSETS_DIR
 
 
 def compute_sha1(data: bytes) -> str:

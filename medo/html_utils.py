@@ -2,6 +2,7 @@
 medo/html_utils.py
 HTML sanitization and manipulation utilities.
 """
+import html as _html
 import re
 from html.parser import HTMLParser
 from typing import Optional
@@ -32,6 +33,19 @@ ALLOWED_STYLE_PROPS = {"color", "font-weight", "font-style", "text-decoration"}
 
 # Obfuscation: zero-width / invisible characters injected between letters
 _INVIS_RE = re.compile(r"[\u200b-\u200f\u2060-\u2064\ufeff]")
+
+
+def _attr(name: str, value: str) -> str:
+    """One serialized attribute, fully escaped.
+
+    ``HTMLParser`` already decodes character references in attribute values,
+    so a value like ``class='a" onmouseover="alert(1)'`` arrives as
+    ``a" onmouseover="alert(1)``.  Interpolating that verbatim closed the
+    attribute early and injected a live event handler into the stored HTML —
+    which the UI then renders with ``innerHTML``.  Re-encoding is what keeps
+    the sanitizer's allow-list actually binding.
+    """
+    return f'{name}="{_html.escape(str(value), quote=True)}"'
 
 
 def _filter_style(style_value: str) -> str:
@@ -110,11 +124,13 @@ class _Sanitizer(HTMLParser):
                 continue
             if allowed is not None and key not in allowed:
                 continue
+            if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*", key or ""):
+                continue  # never let a crafted name through
             if key == "style":
                 val = _filter_style(val)
                 if not val:
                     continue
-            filtered_attrs.append(f'{key}="{val}"')
+            filtered_attrs.append(_attr(key, val))
 
         # Inline highlight <i style="color:...;font-weight:700"> -> <mark>/<b>
         emit = tag_l

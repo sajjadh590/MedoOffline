@@ -20,7 +20,7 @@ from medo.db import (
 )
 from medo.exporter import WEB_DIR, export_web_bundle
 from medo.models import AnswerSource, ParsedOption, ParsedQuestion
-from medo.scraper import extract_menu_links
+from medo.scraper import extract_entry_links, extract_menu_links
 
 
 def _make_question(stem: str, url: str, ordinal: int) -> ParsedQuestion:
@@ -86,6 +86,16 @@ def test_style_css_has_no_external_urls():
     assert "fonts/Vazirmatn-Regular.woff2" in css
 
 
+def test_qr_library_is_bundled_and_exported(seeded_db, tmp_path):
+    vendor = WEB_DIR / "vendor" / "qrcode.js"
+    assert vendor.is_file() and vendor.stat().st_size > 10_000
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'src="vendor/qrcode.js"' in html
+
+    out = export_web_bundle(output_dir=tmp_path / "distqr", db_path=seeded_db)
+    assert (out / "vendor" / "qrcode.js").is_file()
+
+
 def test_pwa_files_present():
     font = WEB_DIR / "fonts" / "Vazirmatn-Regular.woff2"
     assert font.is_file()
@@ -137,6 +147,29 @@ def test_export_copies_pwa_assets_and_injects_data_scripts(seeded_db, tmp_path):
     assert "fonts.googleapis" not in html
 
 
+def test_bank_keeps_answers_and_flags_missing(seeded_db):
+    """A stored answer must survive the export; a question the site never
+    revealed must be exported as missing, not as option 1."""
+    from medo.share import build_android_bundle
+
+    conn = get_connection(seeded_db)
+    missing = _make_question("سوال بدون پاسخ استخراج‌شده", "/qbank/topic-id-79?page=3", 3)
+    missing.correct_index = None
+    missing.answer_source = AnswerSource.UNKNOWN
+    missing.compute_content_hash()
+    upsert_question(conn, missing, topic_id=79)
+    conn.close()
+
+    bank = build_android_bundle(seeded_db)
+    answers = [q["correct"] for q in bank["questions"]]
+    assert answers.count(2) == 2
+    assert answers.count(None) == 1
+    assert bank["stats"]["with_answer"] == 2
+    assert bank["stats"]["missing_answer"] == 1
+    # The exported question keeps its path and topic, so the tree can find it.
+    assert all(q["topic_id"] == 79 for q in bank["questions"])
+
+
 # --- db helpers ---------------------------------------------------------------
 
 def test_refresh_question_paths(seeded_db):
@@ -178,3 +211,22 @@ def test_extract_menu_links():
     # normalize_single_line strips ZWNJ/zero-width chars by design
     assert links[1]["title"] == "آریتمیها"
     assert links[1]["count"] == 45
+
+
+def test_extract_entry_links():
+    """/main-menu links only qbank *landing* pages — they must be found
+    (absolute or relative), deduped, with query/fragment stripped, and
+    non-qbank hrefs ignored.  This is what the category crawl starts from."""
+    html = """
+    <a href="https://medofast.ir/qbank-keshvari">بانک تست کشوری</a>
+    <a href="/qbank-talifi?from=menu#top">بانک تست تالیفی</a>
+    <a href="/qbank">ورود به بانک تست</a>
+    <a href="/qbank/">دوباره همان</a>
+    <a href="/main-menu">منوی اصلی</a>
+    <a href="/qbank/cat-id-1">cat, not an entry</a>
+    """
+    assert extract_entry_links(html) == [
+        "/qbank-keshvari",
+        "/qbank-talifi",
+        "/qbank",
+    ]

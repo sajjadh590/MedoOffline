@@ -13,9 +13,19 @@ from pathlib import Path
 from typing import Generator, Optional
 
 from medo.models import AnswerSource, ExplanationStatus, ParsedImage, ParsedOption, ParsedQuestion
+from medo.paths import DEFAULT_DB_PATH  # noqa: F401  (re-exported: callers import it here)
 
-DEFAULT_DB_PATH = Path("data/medo.db")
 _TOPIC_ID_RE = re.compile(r"topic-id-(\d+)")
+# Micro-topics («مطالعه مبحثی») are a filtered view of their parent topic:
+# /qbank/topic-id-94?tag=1781.  They are real sub-categories of the tree and
+# own their own questions once scraped.
+_TAG_ID_RE = re.compile(r"[?&]tag=(\d+)")
+
+
+def tag_id_of(source_url: str | None) -> Optional[int]:
+    """The ?tag= id in a node URL, or None for a plain topic/category."""
+    m = _TAG_ID_RE.search(source_url or "")
+    return int(m.group(1)) if m else None
 
 
 def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -132,35 +142,98 @@ def init_db(conn: sqlite3.Connection) -> None:
             );
         """)
 
-        # FTS5 full text search table
+        # Per-run internet usage.  One row is written when a run ends, so the
+        # UI can show what today cost and estimate a new download from the
+        # measured average per question.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                questions INTEGER NOT NULL DEFAULT 0,
+                status TEXT,
+                targets TEXT
+            );
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_log(started_at);"
+        )
+
+        # The download the user started last (targets + limits).  Kept in the
+        # database so a login/continuation still knows what to continue after
+        # the app is restarted.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS run_request (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                payload TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+        # Per-subtopic («?tag=») cursor.  A subtopic is a slice of its parent
+        # topic's question pool, so it needs its own cursor: sharing the
+        # topic row made a subtopic download resume at the topic's page and a
+        # finished subtopic look like a finished topic.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS micro_state (
+                topic_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                last_page INTEGER DEFAULT 0,
+                total_pages INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'idle',
+                error_message TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (topic_id, tag_id)
+            );
+        """)
+
+        # FTS5 full-text index over an external content table.
+        #
+        # Its columns must exist in `questions` under the *same* names: the
+        # original declaration listed `options_text` (the real column is
+        # `options_json`), so every content read — count(*), delete, rebuild —
+        # raised "no such column: T.options_text" and the index could never be
+        # repaired.  Detect that legacy declaration and recreate the index.
+        fts_row = cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='questions_fts'"
+        ).fetchone()
+        legacy_fts = bool(fts_row and "options_text" in (fts_row[0] or ""))
+        if legacy_fts:
+            cur.execute("DROP TABLE questions_fts")
+
         cur.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS questions_fts USING fts5(
                 content='questions',
                 content_rowid='id',
                 stem_text,
                 explanation_text,
-                options_text
+                options_json
             );
         """)
 
-        # Triggers to keep FTS5 synchronized with questions table
+        # Triggers are dropped and recreated every start: they are this
+        # module's own definitions, and IF NOT EXISTS would keep an outdated
+        # body (e.g. the legacy column list) alive forever.
+        for trigger in ("questions_ai", "questions_ad", "questions_au"):
+            cur.execute(f"DROP TRIGGER IF EXISTS {trigger}")
         cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS questions_ai AFTER INSERT ON questions BEGIN
-                INSERT INTO questions_fts(rowid, stem_text, explanation_text, options_text)
+            CREATE TRIGGER questions_ai AFTER INSERT ON questions BEGIN
+                INSERT INTO questions_fts(rowid, stem_text, explanation_text, options_json)
                 VALUES (new.id, new.stem_text, coalesce(new.explanation_text, ''), new.options_json);
             END;
         """)
         cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS questions_ad AFTER DELETE ON questions BEGIN
-                INSERT INTO questions_fts(questions_fts, rowid, stem_text, explanation_text, options_text)
+            CREATE TRIGGER questions_ad AFTER DELETE ON questions BEGIN
+                INSERT INTO questions_fts(questions_fts, rowid, stem_text, explanation_text, options_json)
                 VALUES('delete', old.id, old.stem_text, coalesce(old.explanation_text, ''), old.options_json);
             END;
         """)
         cur.execute("""
-            CREATE TRIGGER IF NOT EXISTS questions_au AFTER UPDATE ON questions BEGIN
-                INSERT INTO questions_fts(questions_fts, rowid, stem_text, explanation_text, options_text)
+            CREATE TRIGGER questions_au AFTER UPDATE ON questions BEGIN
+                INSERT INTO questions_fts(questions_fts, rowid, stem_text, explanation_text, options_json)
                 VALUES('delete', old.id, old.stem_text, coalesce(old.explanation_text, ''), old.options_json);
-                INSERT INTO questions_fts(rowid, stem_text, explanation_text, options_text)
+                INSERT INTO questions_fts(rowid, stem_text, explanation_text, options_json)
                 VALUES (new.id, new.stem_text, coalesce(new.explanation_text, ''), new.options_json);
             END;
         """)
@@ -169,6 +242,39 @@ def init_db(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in cur.execute("PRAGMA table_info(questions)").fetchall()}
         if "category_path" not in cols:
             cur.execute("ALTER TABLE questions ADD COLUMN category_path TEXT;")
+        # Subtopic attribution.  A question downloaded through a «?tag=»
+        # filter belongs to that sub-category; a whole-topic download leaves
+        # both NULL (the question's tags are not exposed on its page).
+        if "tag_id" not in cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN tag_id INTEGER;")
+        if "subtopic_title" not in cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN subtopic_title TEXT;")
+        # Bytes of network traffic (page HTML + assets) that this question's
+        # download actually cost.  Measured live, so the UI can report real
+        # consumption instead of guessing from the database file size.
+        if "download_bytes" not in cols:
+            cur.execute(
+                "ALTER TABLE questions ADD COLUMN download_bytes INTEGER DEFAULT 0;"
+            )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_questions_topic_tag "
+            "ON questions(topic_id, tag_id);"
+        )
+
+        # Rows written before the triggers existed are invisible to MATCH.
+        # `questions_fts_docsize` holds one row per *indexed* document —
+        # counting the FTS table itself would just count the content rows.
+        try:
+            questions_n = cur.execute("SELECT count(*) FROM questions").fetchone()[0]
+            indexed_n = cur.execute(
+                "SELECT count(*) FROM questions_fts_docsize"
+            ).fetchone()[0]
+            if legacy_fts or questions_n != indexed_n:
+                cur.execute(
+                    "INSERT INTO questions_fts(questions_fts) VALUES('rebuild')"
+                )
+        except sqlite3.OperationalError:
+            pass
 
 
 def upsert_question(
@@ -176,9 +282,19 @@ def upsert_question(
     q: ParsedQuestion,
     topic_id: Optional[int] = None,
     category_path: Optional[str] = None,
+    tag_id: Optional[int] = None,
+    subtopic_title: Optional[str] = None,
+    download_bytes: int = 0,
 ) -> int:
     """
     Insert or update a parsed question by its content_hash.
+
+    ``tag_id``/``subtopic_title`` are set when the question was read through a
+    subtopic (?tag=) filter; a later whole-topic run leaves them untouched, so
+    a broad re-scrape never erases the finer classification.
+
+    ``download_bytes`` is that question's measured network cost.  A re-scrape
+    with no measurement (0) keeps the previous value instead of erasing it.
     Returns the question database ID.
     """
     if not q.content_hash:
@@ -215,6 +331,9 @@ def upsert_question(
                     explanation_status = ?,
                     has_images = ?,
                     category_path = coalesce(?, category_path),
+                    tag_id = coalesce(?, tag_id),
+                    subtopic_title = coalesce(?, subtopic_title),
+                    download_bytes = CASE WHEN ? > 0 THEN ? ELSE download_bytes END,
                     updated_at = ?
                 WHERE id = ?
             """, (
@@ -233,6 +352,10 @@ def upsert_question(
                 q.explanation_status.value,
                 1 if q.has_images else 0,
                 category_path,
+                tag_id,
+                subtopic_title,
+                int(download_bytes or 0),
+                int(download_bytes or 0),
                 now,
                 qid,
             ))
@@ -243,8 +366,9 @@ def upsert_question(
                     content_hash, stem_html, stem_text, options_json,
                     correct_index, answer_source, vote_percent_json,
                     explanation_html, explanation_text, explanation_status,
-                    has_images, category_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    has_images, category_path, tag_id, subtopic_title,
+                    download_bytes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 topic_id,
                 q.source_url,
@@ -262,6 +386,9 @@ def upsert_question(
                 q.explanation_status.value,
                 1 if q.has_images else 0,
                 category_path,
+                tag_id,
+                subtopic_title,
+                int(download_bytes or 0),
                 now,
                 now,
             ))
@@ -419,8 +546,176 @@ def update_scrape_state(
         """, (topic_id, last_page, total_pages, status, error_message, now))
 
 
-def set_user_answer(conn: sqlite3.Connection, question_id: int, selected_option: int) -> None:
-    """Record user's answered option for interactive offline practice."""
+def save_run_request(conn: sqlite3.Connection, payload: dict) -> None:
+    """Remember the download the user asked for (survives a restart)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with transaction(conn) as cur:
+        cur.execute(
+            """INSERT INTO run_request (id, payload, updated_at)
+               VALUES (1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   payload = excluded.payload,
+                   updated_at = excluded.updated_at""",
+            (json.dumps(payload, ensure_ascii=False), now),
+        )
+
+
+def load_run_request(conn: sqlite3.Connection) -> Optional[dict]:
+    if not _table_exists(conn, "run_request"):
+        return None
+    row = conn.execute("SELECT payload FROM run_request WHERE id = 1").fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(row[0])
+        return data if isinstance(data, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def clear_run_request(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "run_request"):
+        return
+    with transaction(conn) as cur:
+        cur.execute("DELETE FROM run_request WHERE id = 1")
+
+
+def get_micro_state(
+    conn: sqlite3.Connection, topic_id: int, tag_id: int,
+) -> Optional[dict]:
+    """Cursor of one subtopic («?tag=»), or None if never scraped."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM micro_state WHERE topic_id = ? AND tag_id = ?",
+        (topic_id, tag_id),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def update_micro_state(
+    conn: sqlite3.Connection,
+    topic_id: int,
+    tag_id: int,
+    last_page: int,
+    total_pages: Optional[int] = None,
+    status: str = "idle",
+    error_message: Optional[str] = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with transaction(conn) as cur:
+        cur.execute("""
+            INSERT INTO micro_state
+                (topic_id, tag_id, last_page, total_pages, status,
+                 error_message, updated_at)
+            VALUES (?, ?, ?, coalesce(?, 0), ?, ?, ?)
+            ON CONFLICT(topic_id, tag_id) DO UPDATE SET
+                last_page = excluded.last_page,
+                total_pages = CASE WHEN excluded.total_pages > 0
+                                   THEN excluded.total_pages
+                                   ELSE micro_state.total_pages END,
+                status = excluded.status,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at
+        """, (topic_id, tag_id, last_page, total_pages, status,
+              error_message, now))
+
+
+def get_target_state(
+    conn: sqlite3.Connection, topic_id: int, tag_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Cursor for a scrape target: a whole topic or one of its subtopics."""
+    if tag_id is None:
+        return get_scrape_state(conn, topic_id)
+    return get_micro_state(conn, topic_id, int(tag_id))
+
+
+# Statuses that still have unsaved pages: the run may be safely continued.
+RESUMABLE_STATUSES = (
+    "auth_required", "limit", "paused", "interrupted", "running", "stopping",
+)
+# Only these are continued automatically once a login is confirmed.  A guest
+# quota (`limit`) is lifted by logging in; a paid-plan limit is not, but the
+# site cannot be asked which one it was, and resuming re-hits it at once —
+# which is exactly what the user expects after logging in.
+LOGIN_RESUME_STATUSES = ("auth_required", "limit")
+
+
+def pending_resume_targets(
+    conn: sqlite3.Connection, statuses: tuple[str, ...] = RESUMABLE_STATUSES,
+) -> list[dict]:
+    """Unfinished scrape targets, in the site tree's order.
+
+    The continuation that used to live only in the server process (so a
+    restart lost it) is reconstructed from the stored cursors.  Each item is
+    ``{topic_id, tag_id, subtopic_title, last_page, status, label}``.
+    """
+    if not statuses:
+        return []
+    marks = ",".join("?" for _ in statuses)
+    rows: list[dict] = []
+    for r in conn.execute(
+        f"SELECT * FROM scrape_state WHERE status IN ({marks})", statuses
+    ).fetchall():
+        rows.append({
+            "topic_id": int(r["topic_id"]), "tag_id": None,
+            "subtopic_title": None, "last_page": int(r["last_page"] or 0),
+            "status": r["status"], "error_message": r["error_message"] or "",
+        })
+    if _table_exists(conn, "micro_state"):
+        for r in conn.execute(
+            f"SELECT * FROM micro_state WHERE status IN ({marks})", statuses
+        ).fetchall():
+            rows.append({
+                "topic_id": int(r["topic_id"]), "tag_id": int(r["tag_id"]),
+                "subtopic_title": None, "last_page": int(r["last_page"] or 0),
+                "status": r["status"], "error_message": r["error_message"] or "",
+            })
+    # Label each target with its tree title and keep the site's order.  Only
+    # the pending nodes are looked up: this runs on every UI poll.
+    wanted = [f"/qbank/topic-id-{it['topic_id']}" for it in rows]
+    wanted += [f"/qbank/topic-id-{it['topic_id']}?tag={it['tag_id']}"
+               for it in rows if it["tag_id"] is not None]
+    order: dict[tuple[int, Optional[int]], tuple[int, str]] = {}
+    if wanted:
+        marks = ",".join("?" for _ in wanted)
+        for r in conn.execute(
+            f"SELECT source_url, title, position FROM categories "
+            f"WHERE source_url IN ({marks})", wanted
+        ).fetchall():
+            m = _TOPIC_ID_RE.search(r["source_url"] or "")
+            if not m:
+                continue
+            key = (int(m.group(1)), tag_id_of(r["source_url"]))
+            order.setdefault(key, (int(r["position"] or 0), r["title"]))
+    for item in rows:
+        key = (item["topic_id"], item["tag_id"])
+        item["label"] = order.get(key, (0, f"مبحث {item['topic_id']}"))[1]
+        if item["tag_id"] is not None:
+            item["subtopic_title"] = item["label"]
+    tag_order = {k: v[0] for k, v in order.items()}
+    rows.sort(key=lambda it: (tag_order.get((it["topic_id"], None), 9999),
+                              it["tag_id"] is not None,
+                              tag_order.get((it["topic_id"], it["tag_id"]), 9999)))
+    return rows
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone())
+
+
+def set_user_answer(
+    conn: sqlite3.Connection,
+    question_id: int,
+    selected_option: Optional[int],
+) -> None:
+    """Record user's answered option for interactive offline practice.
+
+    ``None`` clears the answer: «پاسخ مجدد» in the UI must undo the stored
+    value too, otherwise the archive keeps counting the answer as attempted.
+    """
     with transaction(conn) as cur:
         cur.execute(
             "UPDATE questions SET user_selected_option = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -439,6 +734,21 @@ def toggle_bookmark(conn: sqlite3.Connection, question_id: int) -> bool:
             (new_val, question_id),
         )
         return bool(new_val)
+
+
+def set_bookmark(conn: sqlite3.Connection, question_id: int, bookmarked: bool) -> bool:
+    """Set the bookmark flag explicitly (idempotent).
+
+    The UI already knows the target state, so a lost/duplicated request must
+    not flip the flag back and forth the way ``toggle_bookmark`` would.
+    """
+    value = 1 if bookmarked else 0
+    with transaction(conn) as cur:
+        cur.execute(
+            "UPDATE questions SET bookmarked = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (value, question_id),
+        )
+    return bool(value)
 
 
 def topics_needing_refill(conn: sqlite3.Connection) -> list[int]:
@@ -512,6 +822,36 @@ def get_categories(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def category_title(conn: sqlite3.Connection, topic_id: int,
+                   tag_id: Optional[int] = None) -> Optional[str]:
+    """The tree's own title for a topic or subtopic node.
+
+    The UI already knows it, but the server must not trust a request body for
+    a name that lives in the database: a mis-encoded or stale client title
+    would be stored next to every question of that subtopic.
+    """
+    url = f"/qbank/topic-id-{int(topic_id)}"
+    if tag_id is not None:
+        url += f"?tag={int(tag_id)}"
+    row = conn.execute(
+        "SELECT title FROM categories WHERE source_url = ?", (url,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def root_rank(title: str) -> int:
+    """Print/browse order the user asked for: internship → pre-internship →
+    authored, then everything else in the site's own order."""
+    t = title or ""
+    if "دستیاری" in t:
+        return 0
+    if "پره" in t and "انترنی" in t:
+        return 1
+    if "تالیفی" in t:
+        return 2
+    return 3
+
+
 def get_category_tree(conn: sqlite3.Connection) -> list[dict]:
     """Nested tree (children ordered by position) for the web UI."""
     nodes = get_categories(conn)
@@ -523,6 +863,8 @@ def get_category_tree(conn: sqlite3.Connection) -> list[dict]:
             by_id[parent]["children"].append(n)
         else:
             roots.append(n)
+    roots.sort(key=lambda n: (root_rank(n.get("title")),
+                              n.get("position") or 0, n.get("id") or 0))
     return roots
 
 
@@ -578,27 +920,293 @@ def refresh_question_paths(conn: sqlite3.Connection, topic_id: Optional[int] = N
     if not paths:
         return 0
     updated = 0
-    for node_url, path in paths.items():
-        m = _TOPIC_ID_RE.search(node_url or "")
-        if not m:
-            continue
-        tid = int(m.group(1))
-        if topic_id is not None and tid != topic_id:
-            continue
-        with transaction(conn) as c:
-            c.execute(
+    # One transaction for the whole pass: a discovered tree easily holds
+    # hundreds of nodes, and a commit per node meant hundreds of fsyncs.
+    with transaction(conn) as cur:
+        for node_url, path in paths.items():
+            # Micro-topic (?tag=) leaves share their parent's question pool;
+            # using the last one would brand every question with one tag.
+            if "?tag=" in (node_url or ""):
+                continue
+            m = _TOPIC_ID_RE.search(node_url or "")
+            if not m:
+                continue
+            tid = int(m.group(1))
+            if topic_id is not None and tid != topic_id:
+                continue
+            cur.execute(
                 "UPDATE questions SET category_path = ? "
                 "WHERE topic_id = ? AND (category_path IS NULL OR category_path != ?)",
                 (path, tid, path),
             )
-            updated += max(c.rowcount, 0)
+            updated += max(cur.rowcount, 0)
     return updated
+
+
+# Placeholder tree used when the site hierarchy is unreachable: every
+# stored topic still gets a node so the UI can group its questions.
+FALLBACK_ROOT_SOURCE = "medo:uncategorized"
+FALLBACK_ROOT_TITLE = "دسته‌بندی‌نشده"
+
+
+def _cleanup_fallback_root(conn: sqlite3.Connection) -> None:
+    """Delete the placeholder root once no node hangs off it anymore."""
+    with transaction(conn) as cur:
+        cur.execute(
+            """DELETE FROM categories
+               WHERE source_url = ?
+                 AND id NOT IN (SELECT parent_id FROM categories
+                                WHERE parent_id IS NOT NULL)""",
+            (FALLBACK_ROOT_SOURCE,),
+        )
+
+
+def prune_placeholder_nodes(conn: sqlite3.Connection) -> int:
+    """Remove empty placeholder branches left behind by older crawls.
+
+    Two kinds only, and only while they have no children:
+
+    * ``…/by-year`` nodes — the site's «به تفکیک دوره و سال» route answers 502
+      so these branches can never fill;
+    * ``medo:path:…`` chains written from an on-page breadcrumb once the real
+      topic is re-parented under the discovered tree.
+
+    The «دسته‌بندی‌نشده» root is pruned only when nothing hangs off it.
+    Returns the number of deleted rows. Safe to call repeatedly.
+    """
+    deleted = 0
+    # Repeat: deleting a leaf can make its parent childless (year → lesson),
+    # so one pass would leave every other level behind.
+    for _ in range(16):
+        removed_this_pass = 0
+        with transaction(conn) as cur:
+            cur.execute(
+                """SELECT id FROM categories
+                   WHERE source_url LIKE '%/by-year%'
+                      OR source_url LIKE 'medo:path:%'"""
+            )
+            candidates = [int(row[0]) for row in cur.fetchall()]
+            for node_id in candidates:
+                child = cur.execute(
+                    "SELECT 1 FROM categories WHERE parent_id = ? LIMIT 1", (node_id,)
+                ).fetchone()
+                if child:
+                    continue
+                cur.execute("DELETE FROM categories WHERE id = ?", (node_id,))
+                removed_this_pass += 1
+            cur.execute(
+                """DELETE FROM categories
+                   WHERE source_url = ?
+                     AND id NOT IN (SELECT parent_id FROM categories
+                                    WHERE parent_id IS NOT NULL)""",
+                (FALLBACK_ROOT_SOURCE,),
+            )
+            removed_this_pass += cur.rowcount
+        deleted += removed_this_pass
+        if not removed_this_pass:
+            break
+    return deleted
+
+
+def ensure_fallback_topic_nodes(conn: sqlite3.Connection) -> int:
+    """Give every topic with stored questions a node in the tree.
+
+    Extracted questions must be groupable even when the site's hierarchy
+    was never (or could not be) fetched. Creates a «دسته‌بندی‌نشده» root
+    plus one «مبحث N» node per topic not present in ``categories`` — using
+    the topic's real ``/qbank/topic-id-N`` source_url, so a later real
+    classification (discover or on-page breadcrumb) replaces it in place.
+    Idempotent; returns how many nodes were created.
+    """
+    rows = conn.execute(
+        "SELECT topic_id, count(*) FROM questions "
+        "WHERE topic_id IS NOT NULL GROUP BY topic_id"
+    ).fetchall()
+    if not rows:
+        return 0
+    counts = {int(r[0]): int(r[1]) for r in rows}
+    existing = set()
+    for (url,) in conn.execute("SELECT source_url FROM categories").fetchall():
+        m = _TOPIC_ID_RE.search(url or "")
+        # A subtopic («?tag=») shares its parent's topic id but is not the
+        # topic node: counting it as one left the topic itself missing from
+        # the tree, so its questions had no row to be grouped under.
+        if m and not _TAG_ID_RE.search(url or ""):
+            existing.add(int(m.group(1)))
+    missing = [t for t in counts if t not in existing]
+    if not missing:
+        _cleanup_fallback_root(conn)
+        return 0
+    root_id = upsert_category(
+        conn, kind="category", title=FALLBACK_ROOT_TITLE,
+        source_url=FALLBACK_ROOT_SOURCE, position=999,
+    )
+    for tid in sorted(missing):
+        upsert_category(
+            conn, kind="topic", title=f"مبحث {tid}",
+            source_url=f"/qbank/topic-id-{tid}", parent_id=root_id,
+            position=999, question_count=counts.get(tid, 0),
+        )
+    refresh_question_paths(conn)
+    return len(missing)
+
+
+_TREE_CAT_RE = re.compile(r"/qbank/cat-id-\d+")
+
+
+def is_tree_backed_topic(conn: sqlite3.Connection, topic_id: int) -> bool:
+    """True when the topic node already hangs off a discovered category.
+
+    Such a node must never be re-parented by a breadcrumb pass: discovery put
+    it under its real category (e.g. «دستیاری پزشکی » قلب»), while a
+    breadcrumb chain would move it under «دستیاری پزشکی » 1405 » قلب» and
+    split the archive away from the tree.
+    """
+    row = conn.execute(
+        "SELECT parent_id FROM categories WHERE source_url = ?",
+        (f"/qbank/topic-id-{topic_id}",),
+    ).fetchone()
+    if not row:
+        return False
+    parent = row["parent_id"]
+    seen: set[int] = set()
+    for _ in range(12):
+        if parent is None or parent in seen:
+            return False
+        seen.add(int(parent))
+        node = conn.execute(
+            "SELECT source_url, parent_id FROM categories WHERE id = ?",
+            (parent,),
+        ).fetchone()
+        if not node:
+            return False
+        if _TREE_CAT_RE.search(node["source_url"] or ""):
+            return True
+        parent = node["parent_id"]
+    return False
+
+
+def ensure_topic_path(conn: sqlite3.Connection, topic_id: int,
+                      segments: list[str]) -> str:
+    """Classify one topic from its on-page breadcrumb (no site tree needed).
+
+    ``segments`` are the Persian titles in path order as shown on the
+    question page itself, e.g. ['دستیاری پزشکی', '1405', 'غدد',
+    'دیابت و هایپوگلایسمی'] — category, year, section, topic (the middle
+    parts are optional). Reuses an existing root with the same title when
+    one is already known (so breadcrumb chains attach to the discovered
+    tree instead of duplicating it), builds the missing chain otherwise,
+    then re-points the real topic node at it, rewrites this topic's
+    ``questions.category_path`` and cleans up the placeholder root.
+    Returns the stored path.
+    """
+    segs = [str(s).strip() for s in (segments or []) if str(s).strip()]
+    if not segs:
+        return ""
+
+    topic_url = f"/qbank/topic-id-{topic_id}"
+    existing = conn.execute(
+        "SELECT id FROM categories WHERE source_url = ?", (topic_url,)
+    ).fetchone()
+    if existing:
+        # The node already exists (discovery, fallback or an earlier pass).
+        # Re-parenting it from a page breadcrumb is what used to split the
+        # archive out of the real tree, so only the stored paths follow.
+        refresh_question_paths(conn, topic_id)
+        stored = build_topic_paths(conn).get(topic_url)
+        return stored or " » ".join(segs)
+
+    parent_id: Optional[int] = None
+    row = conn.execute(
+        "SELECT id FROM categories WHERE parent_id IS NULL "
+        "AND kind = 'category' AND title = ? ORDER BY id LIMIT 1",
+        (segs[0],),
+    ).fetchone()
+    if row:
+        parent_id = int(row[0])
+    else:
+        parent_id = upsert_category(
+            conn, kind="category", title=segs[0],
+            source_url=f"medo:path:{segs[0]}", position=999,
+        )
+
+    chain = [segs[0]]
+    for seg in segs[1:-1]:
+        chain.append(seg)
+        parent_id = upsert_category(
+            conn, kind="section", title=seg,
+            source_url="medo:path:" + "|".join(chain),
+            parent_id=parent_id, position=999,
+        )
+
+    upsert_category(
+        conn, kind="topic", title=segs[-1],
+        source_url=f"/qbank/topic-id-{topic_id}",
+        parent_id=parent_id, position=999,
+    )
+    refresh_question_paths(conn, topic_id)
+    _cleanup_fallback_root(conn)
+
+    stored = build_topic_paths(conn).get(f"/qbank/topic-id-{topic_id}")
+    return stored or " » ".join(segs)
+
+
+def reconcile_categories(conn: sqlite3.Connection) -> dict:
+    """Bring the stored hierarchy and every question's path back in sync.
+
+    Run after a scrape or a discovery: new topics get a fallback node, and a
+    re-discovered tree (renamed/moved sections) rewrites the stored
+    ``category_path`` of questions that were filed under the old one — the
+    sidebar reads the tree, the question badge reads the path, and the two
+    used to disagree after a discovery.
+    """
+    created = ensure_fallback_topic_nodes(conn)
+    updated = refresh_question_paths(conn)
+    fixed = normalize_category_kinds(conn)
+    return {"created": created, "paths_updated": updated, "kinds_fixed": fixed}
+
+
+def normalize_category_kinds(conn: sqlite3.Connection) -> int:
+    """Store the true node kind instead of the crawl-depth guess.
+
+    Discovery assigns kinds by depth (category/lesson/section), which files a
+    subtopic («?tag=») as a section and a breadcrumb-built chain as whatever
+    the depth happened to be.  The URL says what the node is; the UI and the
+    export both read this field.
+    """
+    fixed = 0
+    with transaction(conn) as cur:
+        rows = cur.execute(
+            "SELECT id, kind, source_url FROM categories"
+        ).fetchall()
+        for r in rows:
+            url = r["source_url"] or ""
+            if tag_id_of(url) is not None:
+                want = "subtopic"
+            elif url.startswith("medo:path:"):
+                # Breadcrumb chains: the head (no «|» separator) is a root
+                # category, every deeper segment is a section.
+                want = "category" if "|" not in url else "section"
+            elif "/by-year" in url:
+                want = "section"
+            elif _TOPIC_ID_RE.search(url):
+                want = "topic"
+            elif "/qbank/cat-id-" in url:
+                want = "category"
+            else:
+                continue
+            if r["kind"] != want:
+                cur.execute("UPDATE categories SET kind = ? WHERE id = ?",
+                            (want, r["id"]))
+                fixed += 1
+    return fixed
 
 
 def get_category_progress(conn: sqlite3.Connection) -> dict[str, dict]:
     """Per-node progress: {source_url: {scraped, status, total_pages, last_page}}.
 
-    scraped = questions stored for that topic; status from scrape_state
+    scraped = questions stored for that topic (or for that subtopic when the
+    node is a «?tag=» filter); status comes from the matching cursor table
     ('completed' | 'running' | 'paused' | 'limit' | ... | None if never run).
     """
     cur = conn.cursor()
@@ -608,22 +1216,138 @@ def get_category_progress(conn: sqlite3.Connection) -> dict[str, dict]:
     ).fetchall()
     by_topic = {r["topic_id"]: r["n"] for r in rows}
 
+    by_tag: dict[tuple[int, int], int] = {}
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(questions)").fetchall()}
+    if "tag_id" in cols:
+        for r in cur.execute(
+            "SELECT topic_id, tag_id, count(*) AS n FROM questions "
+            "WHERE topic_id IS NOT NULL AND tag_id IS NOT NULL "
+            "GROUP BY topic_id, tag_id"
+        ).fetchall():
+            by_tag[(int(r["topic_id"]), int(r["tag_id"]))] = int(r["n"])
+
     states = {
         r["topic_id"]: dict(r)
         for r in (dict(x) for x in cur.execute("SELECT * FROM scrape_state").fetchall())
     }
+    micro_states: dict[tuple[int, int], dict] = {}
+    if _table_exists(conn, "micro_state"):
+        micro_states = {
+            (int(r["topic_id"]), int(r["tag_id"])): dict(r)
+            for r in (dict(x) for x in cur.execute("SELECT * FROM micro_state").fetchall())
+        }
+
     out: dict[str, dict] = {}
     for n in get_categories(conn):
         m = _TOPIC_ID_RE.search(n["source_url"] or "")
         tid = int(m.group(1)) if m else None
-        st = states.get(tid) if tid is not None else None
+        tag = tag_id_of(n["source_url"])
+        if tid is None:
+            st = None
+        elif tag is not None:
+            st = micro_states.get((tid, tag))
+        else:
+            st = states.get(tid)
         out[n["source_url"]] = {
-            "scraped": by_topic.get(tid, 0) if tid is not None else 0,
+            "scraped": (by_tag.get((tid, tag), 0) if tag is not None
+                        else by_topic.get(tid, 0)) if tid is not None else 0,
             "declared": n.get("question_count") or 0,
             "status": (st or {}).get("status"),
             "last_page": (st or {}).get("last_page", 0),
             "total_pages": (st or {}).get("total_pages", 0),
         }
+    return out
+
+
+def declared_questions(conn: sqlite3.Connection, topic_id: int,
+                       tag_id: Optional[int] = None) -> int:
+    """How many questions the site's tree says this node holds (0 = unknown)."""
+    url = f"/qbank/topic-id-{int(topic_id)}"
+    if tag_id is not None:
+        url += f"?tag={int(tag_id)}"
+    try:
+        row = conn.execute(
+            "SELECT question_count FROM categories WHERE source_url = ?", (url,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    return int((row[0] if row else 0) or 0)
+
+
+def record_usage(
+    conn: sqlite3.Connection,
+    started_at: str,
+    finished_at: Optional[str],
+    byte_count: int,
+    questions: int,
+    status: str = "completed",
+    targets: Optional[list[dict]] = None,
+) -> None:
+    """Store the measured network cost of one download run."""
+    payload = json.dumps(targets or [], ensure_ascii=False)
+    with transaction(conn) as cur:
+        cur.execute(
+            "INSERT INTO usage_log "
+            "(started_at, finished_at, bytes, questions, status, targets) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (started_at, finished_at, int(byte_count or 0), int(questions or 0),
+             status, payload),
+        )
+
+
+def get_usage_summary(conn: sqlite3.Connection) -> dict:
+    """Internet usage so far, in bytes.
+
+    ``avg_bytes_per_question`` prefers the measured per-run history; before any
+    run has finished it falls back to the per-question measurements stored on
+    the questions themselves.  0 means «not measured yet» — callers must not
+    invent an estimate from it.
+    """
+    out = {
+        "total_bytes": 0, "total_questions": 0,
+        "today_bytes": 0, "today_questions": 0,
+        "avg_bytes_per_question": 0, "runs": 0,
+    }
+    try:
+        row = conn.execute(
+            "SELECT coalesce(sum(bytes), 0), coalesce(sum(questions), 0), "
+            "count(*) FROM usage_log"
+        ).fetchone()
+        out["total_bytes"], out["total_questions"], out["runs"] = (
+            int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+        row = conn.execute(
+            "SELECT coalesce(sum(bytes), 0), coalesce(sum(questions), 0) "
+            "FROM usage_log "
+            "WHERE date(started_at, 'localtime') = date('now', 'localtime')"
+        ).fetchone()
+        out["today_bytes"], out["today_questions"] = (
+            int(row[0] or 0), int(row[1] or 0))
+    except sqlite3.OperationalError:
+        pass
+    # Typical per-question cost = real traffic ÷ real questions over runs
+    # large enough for their one-off start-up load to be amortised.  A 1–2
+    # question run is excluded: its app-shell load would triple the average.
+    try:
+        row = conn.execute(
+            "SELECT coalesce(sum(bytes), 0), coalesce(sum(questions), 0) "
+            "FROM usage_log WHERE questions >= 3"
+        ).fetchone()
+        if int(row[1] or 0) > 0:
+            out["avg_bytes_per_question"] = int(row[0]) // int(row[1])
+    except sqlite3.OperationalError:
+        pass
+    # No whole-run history yet (e.g. an archive from before usage_log): fall
+    # back to the per-question measurements once there are enough of them.
+    if out["avg_bytes_per_question"] <= 0:
+        try:
+            row = conn.execute(
+                "SELECT coalesce(avg(download_bytes), 0), count(*)"
+                " FROM questions WHERE download_bytes > 0"
+            ).fetchone()
+            if int(row[1] or 0) >= 3:
+                out["avg_bytes_per_question"] = int(row[0])
+        except sqlite3.OperationalError:
+            pass
     return out
 
 

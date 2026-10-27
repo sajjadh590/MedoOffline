@@ -1,0 +1,441 @@
+.tree-sidebar {
+  display: none;
+  width: 358px;
+  min-width: 320px;
+  max-width: 40vw;
+  height: 100%;
+  overflow: hidden;
+  border-left: 1px solid var(--border-color);
+  padding: 14px 12px 10px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tree-sidebar.open {
+  display: flex;
+}
+
+.tree-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.tree-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tree-title {
+  font-size: 0.94rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.tree-summary {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+
+.tree-close-btn {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--opt-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--tr-fast);
+}
+
+.tree-close-btn:hover {
+  color: var(--text-main);
+  border-color: var(--accent-blue);
+}
+
+.tree-hint {
+  margin: 0;
+  flex-shrink: 0;
+  font-size: 0.69rem;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+
+.tree-hint-dl {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0 2px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--opt-bg);
+  color: var(--accent-blue);
+  vertical-align: -3px;
+}
+
+.tree-search-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.tree-search-icon {
+  position: absolute;
+  inset-inline-start: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.tree-search {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  background: var(--opt-bg);
+  color: var(--text-main);
+  border-radius: 9px;
+  padding: 8px 10px 8px 30px;
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  outline: none;
+  transition: border-color var(--tr-fast);
+}
+
+.tree-search:focus {
+  border-color: var(--accent-blue);
+}
+
+.tree-search::placeholder {
+  color: var(--text-dim);
+}
+
+.tree-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.1);
+  font-size: 0.72rem;
+}
+
+.tree-filter-label {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.tree-filter-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.tree-clear-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border-color);
+  background: var(--opt-bg);
+  color: var(--text-muted);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: all var(--tr-fast);
+}
+
+.tree-clear-btn:hover {
+  color: var(--text-main);
+  border-color: var(--accent-blue);
+}
+
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px 6px 0;
+}
+
+.tree-node {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 34px;
+  text-align: right;
+  padding: 5px 8px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background var(--tr-fast), border-color var(--tr-fast), color var(--tr-fast);
+}
+
+.tree-row:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
+.tree-row:hover {
+  background: var(--opt-hover);
+  border-color: var(--border-color);
+}
+
+.tree-row.active {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: rgba(59, 130, 246, 0.5);
+}
+
+.tree-row.active .tree-node-title {
+  color: var(--accent-blue);
+  font-weight: 700;
+}
+
+.tree-row.active::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--accent-blue);
+}
+
+.tree-row.is-category .tree-node-title {
+  font-weight: 700;
+  font-size: 0.84rem;
+}
+
+.tree-row.is-topic .tree-node-title {
+  font-weight: 500;
+}
+
+.tree-row-micro {
+  min-height: 27px;
+  padding: 3px 8px 3px 6px;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.tree-row-micro .tree-node-title {
+  font-weight: 400;
+}
+
+.tree-row-micro:hover {
+  color: var(--text-main);
+}
+
+.tree-dl {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid var(--border-color);
+  background: var(--opt-bg);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--tr-fast);
+}
+
+.tree-dl:hover,
+.tree-dl:focus-visible {
+  color: #fff;
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+body.tree-downloading .tree-dl {
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+.tree-count {
+  flex-shrink: 0;
+  font-size: 0.66rem;
+  color: var(--text-dim);
+  background: var(--opt-bg);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-count.has-data {
+  color: var(--accent-success);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.tree-badge-partial {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  line-height: 1.5;
+  color: var(--accent-warning);
+  border: 1px solid var(--accent-warning);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.tree-badge-done {
+  flex-shrink: 0;
+  color: var(--accent-success);
+  font-size: 0.78rem;
+}
+
+.tree-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--text-dim);
+  transition: transform var(--tr-fast), color var(--tr-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.tree-chevron:hover {
+  color: var(--accent-blue);
+}
+
+.tree-chevron.empty {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.tree-node.collapsed > .tree-row .tree-chevron {
+  transform: rotate(90deg);
+}
+
+.tree-node.collapsed > .tree-children {
+  display: none;
+}
+
+.tree-node-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-inline-start: 10px;
+  padding-inline-start: 9px;
+  border-inline-start: 1px solid var(--border-color);
+}
+
+.tree-progress {
+  height: 3px;
+  background: var(--track);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 2px 12px 5px 26px;
+}
+
+.tree-progress-fill {
+  height: 100%;
+  background: var(--accent-blue);
+  border-radius: 999px;
+}
+
+.tree-progress-fill.done {
+  background: var(--accent-success);
+}
+
+.tree-empty {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  line-height: 1.9;
+  text-align: center;
+  padding: 22px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  margin-top: 4px;
+}
+
+.tree-empty code {
+  color: var(--accent-blue);
+  font-size: 0.74rem;
+}
+
+.tree-backdrop {
+  display: none;
+}
+
+body.tree-open .tree-backdrop {
+  display: block;
+  position: fixed;
+  inset: 68px 0 0 0;
+  z-index: 55;
+  background: rgba(3, 8, 15, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+@media (max-width: 1279px) {
+  .tree-sidebar {
+    display: flex;
+    position: fixed;
+    top: 68px;
+    bottom: 0;
+    right: 0;
+    width: min(88vw, 360px);
+    max-width: none;
+    height: auto;
+    z-index: 60;
+    transform: translateX(105%);
+    transition: transform 0.22s ease;
+    background: var(--bg-card);
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+  }
+
+  .tree-sidebar.open {
+    transform: none;
+  }
+
+  body.tree-open {
+    overflow: hidden;
+  }
+}
+
+@media (min-width: 1280px) {
+  .tree-backdrop {
+    display: none !important;
+  }
+}
+

@@ -93,9 +93,76 @@ def _decode_b64(s: str) -> str:
 
 _MARKER_RE     = re.compile(r"تایید\s*گزینه\s*(\d)", re.UNICODE)
 _CORRECT_COLOR = "rgb(48, 127, 226)"
+
+# The answer is printed in several shapes across the site's templates and the
+# owner's own explanations: «تایید گزینه ۳», «پاسخ صحیح: گزینهٔ ۲», «گزینه ۴
+# صحیح است». Only forms that *state* a correct option are listed; «گزینه ۲
+# نادرست است» must never be read as an answer.
+_MARKER_RES = (
+    re.compile(r"(?:تایید|تأیید)\s*گزینه\s*([0-9]{1,2})"),
+    re.compile(r"پاسخ\s*(?:صحیح|درست)\s*[:：\-]?\s*گزینه\s*[ٔ\s]*([0-9]{1,2})"),
+    re.compile(r"گزینه\s*[ٔ\s]*([0-9]{1,2})\s*(?:صحیح|درست)\s*(?:است|هست|می\u200cباشد)"),
+)
+
+# Class/data tokens that unambiguously mark the correct label. Deliberately
+# narrow: a generic `answer`/`right` token appears on every option row.
+_CORRECT_TOKENS = {
+    "correct", "is-correct", "answer-correct", "option-correct",
+    "right-answer", "true-answer", "fa-check", "fa-check-circle",
+    "check-circle", "bi-check", "bi-check-circle", "icon-check",
+}
+_BENGALI_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 _WRONG_COLOR   = "rgb(239, 64, 86)"
 _COLOR_RE      = re.compile(r"color:\s*(rgb\(\d[\d,\s]*\))", re.IGNORECASE)
 _IMG_SRC_RE    = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
+# Site chrome (login / "your history on this test" widget)
+#
+# While the stem is still encrypted the only visible paragraphs on the page
+# belong to this widget.  It must never be mistaken for a question stem —
+# that is what produced stored "questions" such as
+# «سابقه عملکرد شما در این تست: ...».
+# ---------------------------------------------------------------------------
+
+_WIDGET_TEXT_MARKERS: tuple[str, ...] = (
+    "سابقه عملکرد شما در این تست",
+    "لاگین سریع",
+    "محاسبه هوشمند",
+    "آخرین پاسخ دهی",
+    # First navigation of a fresh session can serve a browser-check notice or
+    # the site's SMS login page (also used as an anti-bot redirect) before the
+    # single-page app boots; neither is ever a question.
+    "پشتیبانی نمی",
+    "مرورگر شما",
+    "مرورگرهای پشتیبانی",
+    "پشتیبانی شده",
+    "کد تایید به شما پیامک",
+    "سیاست حریم خصوصی",
+    "در حال انتقال به سایت",
+)
+
+# Stable ids of chrome blocks (the widget also lives under `#strt`).
+_NOISE_IDS: frozenset[str] = frozenset(
+    {"pointPopup", "yektanet-ad", "mediaad", "strt", "statistics-title"}
+)
+
+
+def is_site_widget_text(text: str) -> bool:
+    """True when `text` comes from site chrome rather than a question."""
+    flat = normalize_single_line(text)
+    return any(marker in flat for marker in _WIDGET_TEXT_MARKERS)
+
+
+def is_valid_stem_text(text: str, min_len: int = 12) -> bool:
+    """A storable stem: real question text, not site chrome.
+
+    Navigation labels ("پنل کاربری", "بانک سوالات") are short and pass every
+    structural check, so a floor on the length is part of the contract.
+    """
+    flat = normalize_single_line(text)
+    return len(flat) >= min_len and not is_site_widget_text(flat)
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +202,7 @@ class _MiniDom(HTMLParser):
             return False
         attrs = node.get("attrs", {})
         eid = attrs.get("id", "")
-        if eid in {"pointPopup", "yektanet-ad", "mediaad"}:
+        if eid in _NOISE_IDS:
             return True
         cls = attrs.get("class", "").lower().split()
         if any(c in {"watermark", "yektanet", "mediaad"} for c in cls):
@@ -411,12 +478,16 @@ def _walk(node: dict):
 
 def _p_text_ok(dom: "_MiniDom", p: dict) -> bool:
     text = normalize_single_line(dom.inner_text(p))
-    return len(text) >= 5
+    return len(text) >= 5 and not is_site_widget_text(text)
 
 
 def _first_visible_paragraph(dom: "_MiniDom", root: dict, rules: list) -> Optional[dict]:
-    """First visible <p> with real text; returns its wrapping block div when
-    there is one (so inner_html keeps the <p>), else the <p> itself."""
+    """First visible <p> with real question text; returns its wrapping block div
+    when there is one (so inner_html keeps every sibling <p> of the stem, not
+    just the first line), else the <p> itself.
+
+    Blocks belonging to site chrome (login / statistics widget) are skipped.
+    """
     for el in _walk(root):
         if el.get("tag") != "p":
             continue
@@ -427,9 +498,14 @@ def _first_visible_paragraph(dom: "_MiniDom", root: dict, rules: list) -> Option
         if not _p_text_ok(dom, el):
             continue
         parent = el.get("parent")
+        candidate = el
         if parent is not None and parent.get("tag") in {"div", "section", "article"}:
-            return parent
-        return el
+            candidate = parent
+        # The wrapper can still be chrome (e.g. its heading carries the
+        # marker) — never hand such a block back as the stem.
+        if is_site_widget_text(dom.inner_text(candidate)):
+            continue
+        return candidate
     return None
 
 
@@ -451,6 +527,12 @@ def find_stem_node(dom: "_MiniDom", rules: list) -> Optional[dict]:
         p = _first_visible_paragraph(dom, container, rules)
         if p is not None:
             return p
+        # The real stem lives inside these containers and is revealed by the
+        # site's JS.  While it is still encrypted the container holds nothing
+        # but chrome — never fall through to a document-wide search here, that
+        # only finds navigation labels ("پنل کاربری") . Returning None lets the
+        # caller wait for the reveal instead of storing junk.
+        return None
     return _first_visible_paragraph(dom, dom._root, rules)
 
 
@@ -597,31 +679,34 @@ def parse_question_html(
     marker_answer: Optional[int] = None
     color_answer:  Optional[int] = None
 
-    # Strategy A: parse (تایید گزینه N) marker from explanation text
-    if expl_text:
-        m = _MARKER_RE.search(expl_text)
-        if m:
-            marker_answer = int(m.group(1))
-    # Also search raw HTML in case invisible chars disrupted text
+    # Strategy A: parse the «correct option N» marker from the text, then from
+    # raw HTML in case invisible chars or markup split it up.
+    marker_answer = _answer_marker(expl_text)
     if marker_answer is None and expl_html_raw:
-        raw_stripped = _INVIS_RE.sub("", expl_html_raw)
-        m = _MARKER_RE.search(raw_stripped)
-        if m:
-            marker_answer = int(m.group(1))
+        marker_answer = _answer_marker(_INVIS_RE.sub("", expl_html_raw))
 
-    # Strategy B (submitted only): read label inline colour
+    # Strategy B (submitted only): the revealed label is coloured or carries a
+    # check/correct class. Collect candidates and accept only a single one, so
+    # a theme that paints every row cannot mark all four as the answer.
     if submitted:
+        marked: list[int] = []
         for opt in options:
             label_node = dom.find_by_id(f"label{opt.index}")
-            if label_node:
-                style = label_node.get("attrs", {}).get("style", "")
-                color = _parse_inline_color(style)
-                if color:
-                    # Normalise: strip spaces inside rgb()
-                    color_norm = re.sub(r"\s+", " ", color).strip()
-                    if _colors_match(color_norm, _CORRECT_COLOR):
-                        color_answer = opt.index
-                        break
+            if not label_node:
+                continue
+            attrs = label_node.get("attrs", {})
+            style = attrs.get("style", "") or ""
+            color = _parse_inline_color(style)
+            is_correct = False
+            if color:
+                color_norm = re.sub(r"\s+", " ", color).strip()
+                is_correct = _colors_match(color_norm, _CORRECT_COLOR)
+            if not is_correct and _label_is_correct(attrs, dom.inner_html(label_node)):
+                is_correct = True
+            if is_correct:
+                marked.append(opt.index)
+        if len(marked) == 1:
+            color_answer = marked[0]
 
     # Determine authoritative answer
     correct_index: Optional[int] = None
@@ -687,6 +772,36 @@ def _rgb_to_tuple(rgb: str) -> Optional[tuple[int, int, int]]:
     if m:
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     return None
+
+
+def _answer_marker(text: Optional[str]) -> Optional[int]:
+    """1-based option number stated as correct in text, or None."""
+    if not text:
+        return None
+    normalised = text.translate(_BENGALI_DIGITS)
+    for pattern in _MARKER_RES:
+        for match in pattern.finditer(normalised):
+            try:
+                number = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= number <= 8:
+                return number
+    return None
+
+
+def _label_is_correct(attrs: dict, inner_html: str) -> bool:
+    """True when the label's class/data/icon marks it as the right answer."""
+    for token in str(attrs.get("class", "")).lower().split():
+        if token in _CORRECT_TOKENS:
+            return True
+    for key, value in attrs.items():
+        name = str(key).lower()
+        if name in {"data-correct", "data-answer", "data-is-correct", "aria-checked"}:
+            if str(value).strip().lower() in {"1", "true", "yes", "correct"}:
+                return True
+    html = (inner_html or "").lower()
+    return "fa-check" in html or "check-circle" in html
 
 
 def _colors_match(a: str, b: str, tolerance: int = 5) -> bool:

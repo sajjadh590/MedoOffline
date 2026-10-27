@@ -2,13 +2,17 @@
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>MedoOffline — بانک سوالات پزشکی</title>
-  <meta name="theme-color" content="#0a0e17">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f6f8fb">
+  <link rel="icon" href="icons/medo.ico" sizes="any">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="style.css">
 </head>
-<body class="theme-dark">
+<body class="theme-light">
+  <a class="skip-link" href="#questionCard">پرش به سوال</a>
   <!-- Top Navbar -->
   <header class="navbar glass">
     <div class="nav-brand">
@@ -34,10 +38,17 @@
     </div>
 
     <div class="nav-actions">
-      <button id="treeToggleBtn" class="nav-btn" title="درخت دسته‌بندی‌ها">
+      <button id="treeToggleBtn" class="nav-btn" title="درخت دسته‌بندی‌ها"
+              aria-controls="treeSidebar" aria-expanded="false">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M3 3h6v6H3zM3 15h6v6H3zM13 6h8M13 12h8M13 18h8"/>
         </svg>
+      </button>
+      <button id="phoneBtn" class="nav-btn btn-highlight btn-phone" title="اتصال به گوشی (وای‌فای یا کابل) و به‌روزرسانی برنامهٔ موبایل">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>
+        </svg>
+        <span class="btn-label-desktop">گوشی</span>
       </button>
       <button id="downloadModalBtn" class="nav-btn btn-highlight" title="دانلود و استخراج سوالات جدید از مدوفست">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
@@ -49,7 +60,8 @@
         <span class="stat-label">دقت:</span>
         <span class="stat-value" id="scoreStat">۰٪</span>
       </div>
-      <button id="paletteToggleBtn" class="nav-btn" title="پالت سوالات">
+      <button id="paletteToggleBtn" class="nav-btn" title="پالت سوالات"
+              aria-controls="paletteSidebar" aria-expanded="true">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
           <rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/>
           <rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/>
@@ -65,19 +77,68 @@
 
   <!-- Main Container -->
   <main class="app-layout">
+    <!-- Category Tree Drawer backdrop (small screens) -->
+    <div class="tree-backdrop" id="treeBackdrop"></div>
+
     <!-- Category Tree Sidebar -->
-    <aside class="tree-sidebar glass" id="treeSidebar">
+    <aside class="tree-sidebar glass" id="treeSidebar" aria-label="درخت دسته‌بندی سوالات">
       <div class="tree-header">
-        <span class="tree-title">دسته‌بندی‌ها</span>
-        <button class="tree-clear-btn" id="treeClearBtn" hidden>نمایش همه</button>
+        <div class="tree-title-wrap">
+          <span class="tree-title">دسته‌بندی‌ها</span>
+          <span class="tree-summary" id="treeSummary"></span>
+        </div>
+        <button class="tree-close-btn" id="treeCloseBtn" type="button"
+                title="بستن فهرست" aria-label="بستن فهرست">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none"
+               stroke="currentColor" stroke-width="2.2">
+            <path d="M18 6 6 18M6 6l12 12"/>
+          </svg>
+        </button>
       </div>
-      <div class="tree-scroll" id="treeScroll">
+      <div class="tree-tabs" role="tablist" aria-label="نمای دسته‌بندی">
+        <button class="tree-tab active" type="button" role="tab"
+                data-tree-mode="mine" aria-selected="true">
+          بانک من (<span id="treeMineCount">۰</span>)
+        </button>
+        <button class="tree-tab" type="button" role="tab"
+                data-tree-mode="all" aria-selected="false">
+          همه دسته‌ها
+        </button>
+      </div>
+      <p class="tree-hint">
+        «بانک من» فقط دسته‌هایی را نشان می‌دهد که سوال دارند؛
+        برای دانلود دستهٔ جدید به «همه دسته‌ها» بروید.
+        روی هر مبحث یا زیرمبحث بزنید تا فقط سوالات همان نمایش داده شود،
+        و دکمهٔ <span class="tree-hint-dl" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+               stroke="currentColor" stroke-width="2.4"><path d="M12 3v12"/>
+            <polyline points="7 10 12 15 17 10"/><path d="M4 21h16"/></svg>
+        </span> همان را دانلود می‌کند.
+      </p>
+      <div class="tree-search-wrap">
+        <svg class="tree-search-icon" viewBox="0 0 24 24" width="14" height="14"
+             fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+        </svg>
+        <input type="search" id="treeSearch" class="tree-search"
+               placeholder="جستجوی دسته یا مبحث…" autocomplete="off"
+               aria-label="جستجوی دسته یا مبحث">
+      </div>
+      <div class="tree-filter-bar" id="treeActiveFilter" hidden>
+        <span class="tree-filter-label">فیلتر فعال:</span>
+        <span class="tree-filter-value" id="treeFilterValue"></span>
+        <button class="tree-clear-btn" id="treeClearBtn" type="button">نمایش همه</button>
+      </div>
+      <div class="tree-scroll" id="treeScroll" role="tree" aria-label="دسته‌بندی‌ها">
         <!-- Rendered via JS from MEDO_TREE -->
       </div>
     </aside>
 
+    <!-- Questions drawer backdrop (small screens) -->
+    <div class="palette-backdrop" id="paletteBackdrop"></div>
+
     <!-- Questions Drawer / Sidebar -->
-    <aside class="palette-sidebar glass" id="paletteSidebar">
+    <aside class="palette-sidebar glass" id="paletteSidebar" aria-label="فهرست سوالات">
       <div class="sidebar-header">
         <div class="filter-tabs">
           <button class="filter-tab active" data-filter="all">همه (<span id="countAll">0</span>)</button>
@@ -92,7 +153,21 @@
 
     <!-- Question Viewport -->
     <section class="viewer-container">
-      <div class="card question-card glass" id="questionCard">
+      <div class="session-bar" id="sessionBar" aria-live="polite">
+        <div class="session-copy">
+          <span class="session-kicker">جلسهٔ مطالعه</span>
+          <strong id="sessionHeadline">—</strong>
+        </div>
+        <div class="session-track" role="presentation">
+          <span class="session-fill" id="sessionFill"></span>
+        </div>
+        <div class="session-accuracy">
+          <b id="sessionAccuracy">۰٪</b>
+          <span>دقت</span>
+        </div>
+      </div>
+
+      <div class="card question-card glass" id="questionCard" tabindex="-1">
         <!-- Card Top Bar -->
         <div class="card-top-bar">
           <div class="q-meta-badges">
@@ -185,10 +260,25 @@
           </svg>
           <span>استخراج و دانلود سوالات از مدوفست</span>
         </div>
-        <button class="modal-close-icon" id="scraperCloseBtn">&times;</button>
+        <div class="modal-head-actions">
+          <button class="modal-min-icon" id="scraperMinBtn" type="button"
+                  title="کوچک‌کردن — دانلود در پس‌زمینه ادامه پیدا می‌کند"
+                  aria-label="کوچک‌کردن پنجرهٔ دانلود">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg>
+          </button>
+          <button class="modal-close-icon" id="scraperCloseBtn" aria-label="بستن">&times;</button>
+        </div>
       </div>
 
       <div class="modal-body">
+        <!-- Shown when opened from the static bundle (no local server) -->
+        <div class="notice-box notice-warning" id="serverMissingBox" style="display: none;">
+          <strong>استخراج نیاز به نرم‌افزار دارد.</strong>
+          این نسخه به‌صورت مستقیم (فایل) باز شده و سرور محلی در دسترس نیست.
+          برای استخراج سوالات از میانبر <b>MedoOffline</b> روی دسکتاپ اجرا کنید تا نرم‌افزار با سرور محلی باز شود،
+          سپس اینجا «شروع دانلود سوالات» را بزنید.
+        </div>
+
         <!-- Auth Status Box -->
         <div class="auth-box glass" id="authBox">
           <div class="auth-info">
@@ -201,24 +291,51 @@
         <!-- Scrape Form -->
         <div class="scrape-form">
           <div class="form-row">
-            <label for="topicInput">شماره یا آدرس مبحث:</label>
-            <input type="text" id="topicInput" placeholder="مثلاً 79 یا https://medofast.ir/qbank/topic-id-79" value="79">
+            <label for="topicSelect">مبحث (از درخت دستهبندی سایت):</label>
+            <div class="tree-select-row">
+              <select id="topicSelect">
+                <option value="">— ابتدا دستهبندیها را بگیرید —</option>
+              </select>
+              <button class="btn btn-sm btn-secondary" id="treeRefreshBtn" title="فراخوانی ساختار دستهبندی از مدوفست">بروزرسانی دستهبندیها</button>
+            </div>
+          </div>
+          <div class="form-row form-row-manual">
+            <label for="topicInput">یا شماره/آدرس دستی مبحث:</label>
+            <input type="text" id="topicInput" placeholder="مثلاً 79 یا .../qbank/topic-id-79">
           </div>
           <div class="form-row-grid">
-            <div class="form-col">
-              <label for="startPageInput">صفحه شروع (اختیاری):</label>
-              <input type="number" id="startPageInput" placeholder="ادامه خودکار" min="1">
+            <div class="form-col form-check-col">
+              <label class="form-check">
+                <input type="checkbox" id="resumeCheckbox">
+                <span>ادامه از محل قبلی</span>
+              </label>
+              <span class="form-hint" id="resumeHint"></span>
             </div>
-            <div class="form-col">
-              <label for="maxPagesInput">حداکثر صفحات:</label>
-              <input type="number" id="maxPagesInput" placeholder="مثلاً: 50" min="1" value="50">
+            <div class="form-col form-check-col">
+              <label class="form-check">
+                <input type="checkbox" id="allQuestionsCheckbox" checked>
+                <span>کل سوالات مبحث</span>
+              </label>
+              <span class="form-hint" id="maxPagesHintWrap" style="display:none;">
+                <label for="maxPagesInput">حداکثر صفحات:</label>
+                <input type="number" id="maxPagesInput" min="1" placeholder="مثلاً: 50">
+              </span>
             </div>
           </div>
           
+          <!-- Average measured traffic per question and an estimate for the
+               selected topic; filled by app.js from /api/scrape/status. -->
+          <div class="usage-estimate" id="usageEstimateText" hidden></div>
+
           <div class="scrape-actions">
             <button class="btn btn-primary" id="startScrapeBtn">
               <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               <span>شروع دانلود سوالات</span>
+            </button>
+            <button class="btn btn-secondary" id="resumeScrapeBtn"
+                    style="display:none;" type="button">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+              <span>ادامه دانلود نیمه‌تمام</span>
             </button>
             <button class="btn btn-danger" id="stopScrapeBtn" style="display:none;">
               <span>توقف دانلود</span>
@@ -235,10 +352,142 @@
             <span id="scrapeStatusText">در حال اجرا...</span>
             <span id="scrapeCountText">۰ سوال استخراج شد</span>
           </div>
+          <!-- Live internet usage: the number is measured from the browser's
+               own responses and updates with every poll. -->
+          <div class="scrape-usage" id="scrapeUsageBox" aria-live="polite">
+            <span class="usage-live" id="scrapeUsageLive">—</span>
+            <span class="usage-sub" id="scrapeUsageSub"></span>
+          </div>
           <div class="scrape-log-terminal" id="scrapeLogTerminal">
             <!-- Live logs injected here -->
           </div>
         </div>
+
+        <!-- Bank health: the two things a scrape can leave broken. Answers
+             and subtopics are repaired by re-reading only those pages. -->
+        <section class="bank-health" id="bankHealthBox" aria-labelledby="bankHealthTitle">
+          <div class="bank-health-head">
+            <strong id="bankHealthTitle">سلامت بانک سوالات</strong>
+            <span id="bankHealthText">در حال بررسی…</span>
+          </div>
+          <p class="form-hint">
+            سوالی که پاسخش ثبت نشده باشد در آزمون غلط شمرده نمی‌شود، ولی بهتر است
+            کامل شود. برای تکمیل، فقط همان صفحه‌ها با حساب واردشده دوباره خوانده
+            می‌شوند؛ هیچ سوالی حذف یا بازنویسی نمی‌شود.
+          </p>
+          <div class="bank-health-actions">
+            <button class="btn btn-sm btn-secondary" id="auditAnswersBtn" type="button">
+              پیدا کردن پاسخ‌های جاافتاده
+            </button>
+            <button class="btn btn-sm btn-secondary" id="syncTagsBtn" type="button">
+              پخش سوال‌ها در زیرمبحث‌ها
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Minimised download dock: the run keeps going while the window is
+       closed, and stop/resume stay one tap away. -->
+  <aside class="dl-dock" id="dlDock" hidden aria-live="polite"
+         aria-label="وضعیت دانلود سوالات">
+    <div class="dl-dock-head">
+      <span class="dl-dock-dot" id="dlDockDot"></span>
+      <span class="dl-dock-title" id="dlDockTitle">در حال دانلود سوالات…</span>
+      <button class="dl-dock-icon" id="dlDockHideBtn" type="button"
+              title="بستن این نوار (دانلود ادامه دارد)" aria-label="بستن نوار">&times;</button>
+    </div>
+    <div class="dl-dock-bar"><div id="dlDockBar"></div></div>
+    <div class="dl-dock-meta">
+      <span id="dlDockCount">۰ سوال</span>
+      <span id="dlDockPage"></span>
+    </div>
+    <div class="dl-dock-actions">
+      <button class="btn btn-sm btn-danger" id="dlDockStopBtn" type="button">توقف</button>
+      <button class="btn btn-sm btn-secondary" id="dlDockResumeBtn"
+              type="button" hidden>ادامه در پس‌زمینه</button>
+      <button class="btn btn-sm btn-secondary" id="dlDockOpenBtn" type="button">جزئیات</button>
+    </div>
+  </aside>
+
+  <!-- Phone / offline transfer modal -->
+  <div class="modal" id="phoneModal">
+    <div class="modal-backdrop" id="phoneBackdrop"></div>
+    <div class="modal-card phone-modal-card glass" role="dialog" aria-modal="true"
+         aria-labelledby="phoneTitle">
+      <div class="modal-header">
+        <div class="modal-title" id="phoneTitle">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round">
+            <rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/>
+          </svg>
+          <span>گوشی و انتقال آفلاین</span>
+        </div>
+        <button class="modal-close-icon" id="phoneCloseBtn" aria-label="بستن">&times;</button>
+      </div>
+
+      <div class="modal-body phone-body">
+        <div class="phone-status">
+          <span class="phone-dot" id="phoneDot"></span>
+          <span id="phoneStatusText">در حال بررسی…</span>
+          <span class="phone-status-meta" id="phoneStatusMeta"></span>
+        </div>
+
+        <section class="phone-section">
+          <h3 class="phone-title"><span class="phone-num">۱</span> از طریق وای‌فای</h3>
+          <p class="phone-text">
+            گوشی و کامپیوتر روی یک وای‌فای باشند. انتقال را روشن کن و آدرس را
+            در برنامهٔ گوشی بزن: <b>دریافت بانک ← از وای‌فای</b>.
+          </p>
+          <div class="phone-urls" id="phoneUrls"></div>
+          <div class="phone-qr-wrap" id="phoneQrWrap" hidden>
+            <div class="phone-qr" id="phoneQr"></div>
+            <p class="phone-qr-note">
+              <span id="phoneQrCaption">با دوربین گوشی اسکن کن؛ بانک تازه همان‌جا دریافت می‌شود.</span>
+              <br><code class="phone-qr-url" id="phoneQrUrl"></code>
+            </p>
+          </div>
+          <div class="phone-actions">
+            <button class="btn btn-primary btn-sm" id="phoneStartBtn">روشن‌کردن انتقال وای‌فای</button>
+            <button class="btn btn-secondary btn-sm" id="phoneStopBtn" hidden>خاموش‌کردن</button>
+            <button class="btn btn-secondary btn-sm" id="phoneRefreshBankBtn">به‌روزرسانی بانک</button>
+          </div>
+        </section>
+
+        <section class="phone-section">
+          <h3 class="phone-title"><span class="phone-num">۲</span> با کابل USB</h3>
+          <p class="phone-text">
+            کابل را وصل کن و این دستور را بزن تا همان سرور روی کابل در دسترس باشد:
+          </p>
+          <div class="phone-command">
+            <code id="phoneAdbCmd">adb reverse tcp:8765 tcp:8765</code>
+            <button class="btn btn-secondary btn-xs" type="button" id="phoneCopyAdbBtn">کپی</button>
+          </div>
+          <p class="phone-text">
+            یا فایل بانک را دانلود کن، با کابل داخل گوشی بریز و در برنامه
+            <b>دریافت بانک ← از فایل</b> را بزن.
+          </p>
+          <a class="btn btn-secondary btn-sm" id="phoneBankDownload"
+             href="/api/phone/bank" download="medo.medo">دانلود فایل بانک</a>
+        </section>
+
+        <section class="phone-section">
+          <h3 class="phone-title"><span class="phone-num">۳</span> برنامهٔ گوشی (APK)</h3>
+          <div class="phone-apk" id="phoneApkInfo">در حال خواندن…</div>
+          <div class="phone-actions">
+            <a class="btn btn-secondary btn-sm" id="phoneApkDownload"
+               href="/api/phone/apk" download="medo.apk">دانلود APK</a>
+            <button class="btn btn-secondary btn-sm" id="phoneApkQr" type="button">QR نصب/به‌روزرسانی</button>
+            <button class="btn btn-primary btn-sm" id="phoneBuildBtn">ساخت APK تازه</button>
+          </div>
+          <pre class="phone-log" id="phoneLog" hidden></pre>
+        </section>
+
+        <p class="phone-note">
+          هر بار سوال جدید دانلود کنی، «به‌روزرسانی بانک» را بزن. آدرس هم با
+          عوض شدن وای‌فای تغییر می‌کند؛ هر بار از همین پنجره بردار.
+        </p>
       </div>
     </div>
   </div>
@@ -252,6 +501,7 @@
     </div>
   </div>
 
+  <script src="vendor/qrcode.js"></script>
   <script src="app.js"></script>
   <script>
     // PWA service worker — only over http(s); file:// bundles skip silently

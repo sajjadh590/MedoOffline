@@ -363,10 +363,1214 @@ python -m medo.cli import-fixtures
 8. **`_print_partial_note` counted non-topic nodes** as "topics" — fixed to
    only count `topic-id-` URLs.
 
+## Session 2026-10-16 — junk/incomplete questions, UI, shortcuts
+
+Reported: "questions come in incomplete / not the real sentence", "the software
+should do the extracting", "the UI looks like every AI tool", "make a desktop
+shortcut".
+
+### Root causes found (all fixed, `91/91` pytest green)
+
+1. **Site chrome was stored as a question stem.** While the site's JS has not
+   yet decrypted the stem, the only readable paragraphs belong to the
+   "سابقه عملکرد شما در این تست" login/statistics widget; the parser's
+   fallback then grabbed navigation labels («پنل کاربری») or the site's
+   browser-check / SMS-login page (also served, in Arabic presentation forms,
+   as an anti-bot redirect after a burst of requests).
+   Fixes, in `medo/parser.py`:
+   - `_WIDGET_TEXT_MARKERS` + `is_site_widget_text()` reject widget, browser-check
+     and login-page text; `is_valid_stem_text()` adds a 12-char floor.
+   - `_NOISE_IDS` now includes `#strt` / `#statistics-title`.
+   - `find_stem_node()` never falls through to a document-wide search while a
+     live container (`#qtxt`, `#questions-container`, …) exists — that fallback
+     only ever found chrome. `None` means "not revealed yet", so the caller waits.
+2. **The harvester accepted the first non-empty stem.** `_parse_with_retry()`
+   now requires BOTH `#label1` (a real question is rendered) and a valid stem,
+   and waits the full patience before giving up — instead of storing junk or
+   bailing after one attempt.
+3. **A login redirect was reported as "completed".** `classify_page()` now
+   NFKC-normalises (the site shapes notices into presentation forms, e.g.
+   "در ﺣﺎل اﻧﺘﻘﺎل..."), `LOGIN_PHRASES` covers the SMS-login page, the
+   `/login` URL is checked directly, and `ScraperTaskController` reports the
+   harvester's real status with a Persian hint (the old code hard-coded
+   "completed").
+4. **The browser served a stale UI/archive.** `sw.js` cached the shell *and*
+   `/api/*` (cache-first), so extracted questions never appeared. Now only
+   fonts/icons are cached; `/api/*` is network-only. `server.py` sends
+   `Cache-Control: no-store` and stamps `app.js`/`style.css`/`manifest.json`
+   URLs with their mtime in `index.html` (`_stamp_assets`), so a patched UI can
+   never be masked by HTTP-cache heuristics.
+
+### Verified
+- `medo.db` holds only app-extracted rows: 29 questions, all
+  `https://medofast.ir/qbank/topic-id-79`, 4 options each, no chrome text
+  (`data/medo.db.bak` is the pre-cleanup copy).
+- Extraction was driven through the app's own «استخراج» button (no hand-inserted
+  questions). Page 1 no longer yields junk: once the site starts answering the
+  topic URL with its login redirect, the app says «نیاز به ورود به حساب» and
+  stores nothing.
+- Desktop shortcuts (`E:\Users\Bit\Desktop`, `C:\Users\Bit\Desktop`):
+  `MedoOffline.lnk` → `pythonw launcher.py` (server + browser; cold start
+  verified: HTTP 200 + `/api/stats`), plus Viewer / PDF Book / CLI.
+- UI restyled towards the real site: light by default (`medo_theme_v2` key so an
+  old dark preference cannot win), white cards, blue `#307fe2`, `<mark>`
+  highlights, flat log panel, Vazirmatn.
+
+### Limitations
+- Explanations are locked for anonymous users: of the 29 rows, 9 have a real
+  `correct_index` and none has an explanation. Logging in via «ورود با مرورگر»
+  (`data/storage_state.json`) is what unlocks them; the harvester already uses
+  that session when present.
+- Topic 79 page 1 could not be captured during this session: the site kept
+  redirecting to `/login` (anti-bot). Re-run after logging in.
+- Probes kept for reuse: `scripts/probe_page1.py`, `scripts/probe_reveal_timing.py`.
+
 ### Notes for next session
-- venv at `.venv/`; run tests: `./.venv/Scripts/python -m pytest -q`.
+- venv at `.venv/`; run tests: `./.venv/Scripts/python -m pytest -q` (91 tests).
 - Fixtures are gitignored (scraped content must never be committed); tests skip
   gracefully when absent — user's real capture lives in `tests/fixtures/`.
 - `upsert_question(..., category_path=...)` — scraper resolves the path once per
   topic via `build_topic_paths` (cached in `Harvester._topic_paths`).
 
+## Session 2026-10-17 — extraction UX overhaul (all 91 tests green)
+
+### What changed
+1. **Auto PDF + web bundle after every scrape** — `ScraperTaskController._worker`
+   now calls `export_web_bundle()` and `export_pdf()` after a run, only when the
+   question count actually grew vs the pre-run snapshot
+   (`stored_total_before`). Output: `dist/medo_test_book.pdf`.
+2. **Login bug fixed** — `auth.py:login_interactive()` no longer uses
+   `input()` (instant `EOFError` under `pythonw`, which closed the browser
+   immediately). It now keeps the visible browser open up to 300 s, polls the
+   page for the post-login menu (`پنل کاربری`) and/or a changed
+   `storage_state.json`, then saves cookies. Cancel = close the window.
+   Extraction itself still works without login; login only unlocks
+   explanations/quota-locked pages.
+3. **Explanations + figures extracted** — harvester reveals `#block-b`
+   (`_reveal_explanation`) whenever stored `explanation_status != full`; stored
+   in `explanation_html/text` plus `explanation_images`.
+4. **Topic picker = site's own tree** — new `/api/discover-tree` endpoint runs
+   `discover_hierarchy()` (BFS over `/main-menu`, one-time); UI replaced the
+   confusing free-text «شماره مبحث» with a `<select>` of every topic path
+   («طب داخلی » قلب و عروق » فریبلسون دهلیزی»), manual input kept as fallback.
+5. **Resume + page-1 default** — scrape always starts at page 1 unless
+   «ادامه از محل قبلی» is checked (server resolves `last_page+1` from
+   `scrape_state`); `updateResumeHint` shows «ادامه از صفحه N».
+6. **«کل سوالات مبحث»** checkbox (default on) replaces the vague max-pages
+   field; unchecking reveals it again.
+7. **Faster extraction** — `Harvester(fast=True)` shrinks polite delays while
+   keeping single-request, in-order scraping.
+8. **UI fixes** — `startPageInput` reference removed from `app.js` (element no
+   longer exists → JS error); `/api/scrape/state` called via POST; tree-refresh
+   now polls controller logs until «درخت دستهبندی گرفته شد» and then reloads the
+   dropdown; `SCRAPER_CONTROLLER.logs` (not the dead per-request `self.logs`)
+   receives discover messages.
+
+### Verified
+- `pytest -q` → 91 passed; `py_compile` on server/auth/scraper/exporter/pdf OK;
+  `node --check medo/web/app.js` OK.
+- `export_web_bundle()` + `export_pdf()` rebuilt `dist/` from live
+  `data/medo.db` (30 questions) — PDF at `dist/medo_test_book.pdf`.
+- Desktop shortcuts regenerated on both desktops (PDF shortcut now exists).
+
+### Remaining limitations
+- Login flow could not be end-to-end tested here (needs real credentials on the
+  user's machine); verify by clicking «ورود با مرورگر» once.
+- `discover_hierarchy()` fetches each category page once (≈ tens of requests);
+  run it once while online, afterwards everything is local.
+
+
+## Session 2026-10-17 (b) — three user-reported regressions fixed (93 tests green)
+
+User reported: (1) categories never arrive from the site, (2) the login window
+now stays open (good) but opens the wrong URL, (3) extraction used to store a
+few questions and now stores none.
+
+### Root causes (all confirmed with live Playwright probes)
+1. **Empty tree** — `/main-menu` contains **zero** `cat-id`/`topic-id` links
+   (verified: `links=0`); it only links the qbank *landing* pages
+   (`/qbank`, `/qbank-keshvari`, `/qbank-talifi`). The BFS seeded solely from
+   `/main-menu`, so it found nothing and stored 0 nodes. Live: keshvari → 5
+   cats (پره انترنی، دستیاری پزشکی، علوم پایه پزشکی/دندانپزشکی، لیسانس به
+   پزشکی), talifi → 2 cats.
+2. **Wrong login URL** — `login_interactive()` opened `https://medofast.ir/qbank/`;
+   the real entry is `https://medofast.ir/login?next=/dashboard/welcome`
+   (confirmed: `?next=` redirect → `/dashboard/...` is the success signal).
+   Also, the old code **always** wrote `storage_state.json` at the end — an
+   incomplete login would overwrite a good session with an empty one (the
+   existing file was in fact 0 cookies = effectively anonymous).
+3. **Silent 0-question runs** — on a logged-out topic page the question text
+   never decrypts («در حال پردازش متن سوال...») and the body only shows the
+   logged-out stats widget («... نیاز است با زدن دکمه زیر، لاگین شوید»).
+   That phrase wasn't in `LOGIN_PHRASES` → `classify_page()` said `empty` →
+   run ended `completed, 0 saved`. Session check (`label1` shell present,
+   `next` absent, no login phrase) reproduced it.
+
+### Fixes
+- `medo/scraper.py`
+  - New `extract_entry_links()` + `_ENTRY_RE`: every crawled page's qbank
+    landing links are followed; the queue is additionally **seeded** with
+    `/qbank-keshvari` and `/qbank-talifi` (discovery no longer depends on one
+    menu's markup). Pure/unit-tested.
+  - New `LOGIN_WIDGET_PHRASES` («لاگین شوید», «لاگین سریع و بازگشت به همین
+    سوال») checked only by `classify_page()` — a widget-only page is now
+    `auth` (clear «نیاز به ورود» status) instead of `empty`. Deliberately not
+    in `LOGIN_PHRASES` so menu pages that merely *link* to login don't abort
+    discovery.
+  - `_parse_with_retry()` gained `DECRYPT_EXTRA_ATTEMPTS = 20` (~24 s) of
+    extra patience *while* the body still shows «در حال پردازش» — slow
+    decryption no longer becomes a 0-question "completed" run.
+  - `discover_hierarchy()` docstring/seeds updated accordingly.
+- `medo/auth.py`
+  - `LOGIN_URL = "https://medofast.ir/login?next=/dashboard/welcome"` is now
+    the default and only success criterion (`/dashboard` in URL, `/login` not).
+  - **Session file is only written after that redirect is observed.**
+    Cancel/timeout keeps the previous `storage_state.json` untouched — an
+    unfinished login can no longer destroy a good session.
+- `medo/cli.py` — discover banner mentions the entry pages.
+- Tests: `test_extract_entry_links()` (absolute/relative/dedupe/strip
+  query+fragment/ignore non-qbank) and `test_auth_notice_logged_out_widget()`
+  → **93 passed**.
+
+### Verified
+- `pytest -q` → 93 passed; `py_compile` (scraper/auth/server) OK;
+  `node --check medo/web/app.js` OK; offline asserts on all three new
+  behaviors OK (`OFFLINE_CHECKS_OK`).
+- Live probes before the site went unreachable: topic page renders with saved
+  session (3/3 stored via CLI, 2/2 via `/api/scrape/start`, auto PDF+dist
+  rebuild confirmed in controller logs); `/login?next=/dashboard/welcome`
+  loads; entry pages expose the 7 top-level cats.
+- `dist/` + `dist/medo_test_book.pdf` rebuilt from current DB (30 questions;
+  the live probes deduped into existing rows, `categories` still 0).
+
+### Remaining limitations
+- **End-to-end live confirmation blocked mid-session**: `medofast.ir` started
+  refusing connections (curl → 000 / `ERR_CONNECTION_RESET`, other sites OK)
+  after the probe burst. Re-run when reachable:
+  `python scripts/probe_tree.py` (entry links + topic render), then the UI's
+  «بروزرسانی دستهبندیها» (or `medo discover`) to fill the tree, then one real
+  login via «ورود با مرورگر» to restore `storage_state.json` (currently empty
+  = anonymous).
+- The tree in `dist/categories.js` is still `{}` until discovery runs online.
+
+## Session 2026-10-18 — durable log, real login signal, self-categorization (109 tests green)
+
+User's three asks: (1) keep a log so the next session starts by *reading*, not
+by re-asking what happened; (2) the login window worked and the user logged in,
+but the app never noticed; (3) extracted questions must be grouped even when the
+site's hierarchy can't be fetched.
+
+### What the evidence showed
+- `launcher.log`: discover fetched 16 pages (main-menu → entry landings →
+  cat-id → by-year) then stopped **silently** with queue=5 and **0 topic nodes**
+  (DB: 12 rows = 7 cats + 5 «به تفکیک دوره و سال») → the UI correctly said
+  «دستهبندیها استخراج نشده» (0 topics in dropdown). Whether it died on an
+  unhandled page-17 exception (controller's in-memory log only) or by-year
+  links normalize back to already-visited self-links could not be proven —
+  because no file captured it. That *is* the logging gap.
+- Login detection watched only `page.url` of ONE tab for `/dashboard`; a
+  same-page login, a second tab, or any other redirect target was invisible →
+  300 s timeout, file untouched, no message anywhere.
+- `questions.category_path` was 0/50: `build_topic_paths()` needs topic nodes
+  that discovery never stored.
+
+### Changes
+1. **`medo/applog.py` (new)** → `logs/medo.log` (timestamped UTF-8, 1 MB
+   rotation, lock-protected, never raises). `_Tee` line-buffers stdout/stderr
+   into the same file; `install_tee()` (idempotent) is called by `serve()`,
+   `discover_hierarchy()`, `scrape_topic()`, `backfill_topic_paths()` and
+   `login_interactive()`. Server: every controller message goes through new
+   `_push()` (UI panel + file); scrape start/done status + full tracebacks,
+   discover start/finish/failure, login outcome, fallback setup and backfill
+   result are all logged. `logs/` gitignored.
+2. **`medo/auth.py` rewritten** — pure `evaluate_login_signal(urls,
+   new_cookies, has_marker)`: (a) any tab on `/dashboard`, or (b) a NEW
+   auth-ish cookie (csrf excluded) + «پنل کاربری» menu rendered in ANY tab.
+   Polls `context.pages` (not one page), snapshots initial cookies (anonymous
+   csrftoken doesn't count), re-probes the marker on change/every 6 s, and does
+   one final check at the deadline. Save happens only on a signal (a cancelled
+   login can never clobber a good session); returns `Optional[Path]` — the
+   server pushes «لاگین انجام شد و ذخیره شد» into the UI log, and the UI's 5 s
+   auth polling flips the status badge by itself.
+3. **Self-categorization without the site tree**
+   - `extract_topic_path(html)` — parses the question page header's stable
+     font-awesome items (`fa-books` category, `fa-calendar-check` year,
+     `fa-syringe` section, `fa-hashtag` topic); longest ascending run ending in
+     a topic wins. Validated on the real fixture: exact
+     `['دستیاری پزشکی','1405','غدد','دیابت و هایپوگلایسمی']`.
+   - `db.ensure_topic_path(conn, tid, segments)` — reuses a discovered root
+     with the same title, otherwise builds a `medo:path:` chain; the topic node
+     keeps the real `/qbank/topic-id-N` URL (progress + later discovery
+     identity), rewrites `questions.category_path`, drops the empty placeholder
+     root.
+   - `db.ensure_fallback_topic_nodes(conn)` — every topic with stored questions
+     gets «مبحث N» under a «دسته‌بندی‌نشده» root (same real topic URL, so a later
+     real classification re-homes it in place). Idempotent; called at server
+     start, after every scrape run and after discover.
+   - `scraper.backfill_topic_paths()` — loads ONE page per unclassified topic
+     headless, reads its breadcrumb, classifies; never raises (offline → error
+     recorded in medo.log). Runs in a daemon thread at server start, waiting
+     while a scrape is active.
+   - Harvester classifies its topic from the FIRST loaded page
+     (`_classify_topic_path`, once per topic) before the first store — new
+     extractions are categorized for free.
+   - discover hardened: per-page try/except (one bad page can't end the crawl
+     silently), up to 8 printed «skipped already-visited» lines (surfaces the
+     by-year self-loop hypothesis), and a printed final summary — all of it
+     lands in medo.log via the tee.
+### Verified
+- `pytest -q` → **109 passed** (16 new in `tests/test_paths_and_log.py`:
+  fixture breadcrumb, synthetic/stray/invisible-char runs, fallback + classify
+  + root-reuse, login-signal matrix, applog write/rotation/never-raises, tee
+  line buffering, controller `_push` cap). `py_compile` + `node --check` OK.
+- Live UI smoke on `127.0.0.1:8092`: `/api/tree` = 15 nodes (7 discovered
+  categories + 5 by-year lessons + fallback root with 2 topics); question card
+  breadcrumb «دسته‌بندی‌نشده » مبحث ۳»; tree drawer shows «مبحث ۳/۷۹» with ناقص
+  badges; 50/50 questions carry `category_path`.
+- `logs/medo.log` captured: server start, tee'd prints, the startup backfill
+  attempting topics 3/79 and failing *gracefully* (`ERR_CONNECTION_RESET` ×2 →
+  structured result line), plus HTTP access lines.
+- `dist/` rebuilt: 8 tree roots incl. fallback, all `questions.json` grouped,
+  `medo_test_book.pdf` regenerated.
+### Remaining limitations
+- Site unreachable again from this machine (proxy fake-IP tunnel): live
+  backfill/discover/login confirmation pending. When online, one app restart
+  auto-classifies «مبحث 3»/«مبحث 79» from their own pages' breadcrumbs, and
+  «بروزرسانی دستهبندیها» fills the full tree — if discover stops, medo.log now
+  shows exactly where and why (dup-skips + per-page errors are printed).
+- `data/storage_state.json` still anonymous — one real «ورود با مرورگر»
+  needed to unlock explanations/quota.
+
+
+## Session 2026-10-19 — full category tree actually discovered (115 tests green)
+
+User: «دسته‌بندی دریافت می‌کند اما فقط دو دسته‌ای که خودم سوال استخراج کرده بودم».
+Real cause was not the offline fallback — discovery itself never reached the tree.
+
+### Live findings (probed directly against medofast.ir)
+- The machine's VPN answers DNS with a fake IP (`medofast.ir → 198.18.0.94`,
+  198.18.0.0/15) and resets TLS (curl exit 35). Pinning the real A record
+  (185.143.233.132 / .234.132, via DNS-over-HTTPS) makes the site reachable —
+  the site itself was fine all along.
+- Tree hops: `/main-menu` → `/qbank`, `/qbank-keshvari`, `/qbank-talifi` →
+  7 categories `/qbank/cat-id-N/` → **lesson cards `<a href="/lobey/L">`**
+  (Persian name in `<h2>`, id in `data-topic-id`) → lesson page whose
+  «شروع مطالعه جامع» button is `onclick="…'/qbank/topic-id-N'"` (no href) →
+  micro-topic rows `/qbank/topic-id-N?tag=T` (the site's real
+  «مبحث» level, with per-topic counts).
+- `/qbank/cat-id-N/by-year/` answers **502** server-side: the old crawl's
+  `by-year` nodes can never fill. (WAF also returns 502 to bare curl UA bursts;
+  a Chrome UA fixes it, and Playwright was never affected.)
+- The old crawler only collected `<a href>` cat-id/topic-id links, so it stored
+  7 categories + 5 dead by-year tabs and zero topics.
+
+### Fixes
+- `scraper.extract_lesson_cards()` / `extract_lesson_page()` (pure, tested):
+  lesson ids + titles + `data-topic-id`, and the page's topic id, bank size and
+  micro-topics (`?tag=` rows with counts).
+- `discover_hierarchy()` rewritten: menu → cat → `/lobey/…` → topic →
+  micro-topic, each node committed immediately; lesson parent is the category's
+  own row id (queueing with the queue item's parent is what made every topic a
+  root); retries the WAF's transient 502 with backoff; login-wall detection by
+  `/login` URL or SMS phrase (nav links no longer abort a public crawl); skips
+  `by-year`; summary now reports categories/topics/micro-topics.
+- `db.prune_placeholder_nodes()`: iteratively deletes childless `…/by-year` and
+  `medo:path:` branches plus the empty «دسته‌بندی‌نشده» root; runs at the end of
+  discover. Idempotent (tested).
+- `medo/netfix.py` + `browser.launch_browser()`: when the OS resolver returns a
+  198.18/15 fake IP, resolve the real address over DoH and pin it with
+  `--host-resolver-rules` — discovery, scraping and the login window all work
+  again behind such VPNs.
+- `/api/tree` unchanged; UI: the topic picker now skips `?tag=` nodes (150 real
+  topics instead of ~2,600 duplicates) and only real topic rows get the active
+  highlight.
+- `_print_partial_note` counts real topics only (same `?tag=` filter).
+
+### Verified
+- Live discover run: **161 pages**, 10 dup-skips → **7 categories, 150 topics,
+  2,435 micro-topics (2,592 nodes)**, 0 root-level topics, 0 placeholders,
+  0 orphan parents; topic 3 → پره انترنی/ریه (298 q), micro-topics آسم 54,
+  آمبولی 46, …
+- `/api/tree` returns 7 roots: تالیفی بالین 28, پره انترنی 28, دستیاری 24,
+  تالیفی علوم پایه 20, علوم پایه پزشکی 19, دندانپزشکی 16, لیسانس 15.
+- UI on `127.0.0.1:8092`: 2,592 tree rows render, sidebar scrolls, no title
+  overflow, picker = 150 topics, clicking «ریه» filters to «سوال ۱ از ۲۰» and
+  highlights only the real topic row. Load event ≈ 0.6 s.
+- All 50 questions keep their breadcrumbs; `dist/categories.json` = 2,592
+  nodes, `dist/questions.json` = 50, PDF rebuilt; `pytest -q` → **115 passed**,
+  `node --check app.js` OK.
+- Backup of the pre-run DB: `data/medo.db.bak-20261019`.
+
+### Remaining limitations
+- Micro-topics are tree leaves only: questions store no tag id, so their
+  `category_path` stops at the lesson level («پره انترنی » ریه»). Scraping a
+  micro-topic (`?tag=T`) is not wired into the harvester yet.
+- `data/storage_state.json` is still anonymous; explanations/quota need one real
+  «ورود با مرورگر».
+- `medofast.ir` TLS only worked with the DoH-pinned IP on this machine; the pin
+  is resolved fresh on every browser launch, so a changed site IP is picked up
+  automatically.
+
+## 2026-10-19 — درخت قابل‌استفاده + ادامه‌ی خودکار پس از ورود
+
+### Why the "logged in but resume did nothing" bug happened
+Two separate faults, both fixed:
+1. **False-positive login.** The old check (`پنل کاربری` text + presence of
+   `sessionid`) fires on the *guest* login page: Django sets a sessionid for
+   every visitor and the header is identical. `data/storage_state.json` was
+   therefore a guest session (4 cookies, no real account), so page 31 kept
+   redirecting to `/login` and every resumed run ended `auth_required` with
+   `saved=0` (see logs 18:35–18:37). Login proof is now the site's own
+   `/dashboard/welcome` URL — `parse_dashboard_navigation()`.
+2. **Unverifiable TLS chain.** This host sends an extra cross-signed
+   certificate; Python/OpenSSL rejects the handshake as "certificate has
+   expired" (the leaf is valid until 2027-01-07), while Chrome/Edge build the
+   path correctly. The old raw-socket check returned
+   `site unreachable (SSLCertVerificationError)` for a perfectly valid login.
+   All session/login checks now run in Chromium (`medo/auth.py`), with a
+   short 90 s cache and a lock so the 5 s UI poll cannot launch two browsers.
+
+### Auto-continue after login
+`ScraperTaskController.last_request` remembers the interrupted run;
+`resume_after_login()` replays it with `resume=True` **only** when the stop
+reason was `auth_required`. `/api/login` calls it as soon as the browser
+confirms the dashboard, and the UI's login poll opens the progress panel when
+it sees that run. No extra click, no restart from page 1.
+
+### Sidebar: select + download in place
+- Every topic row has an always-visible download button (26 px); a category
+  row downloads all its topics after a confirmation. Completed topics ask
+  before a page-1 re-download.
+- Empty categories show a card with a download CTA instead of a dead end.
+- Filter bar follows the selection («دسته (۲۴ مبحث)»), all counts
+  (همه/پاسخ‌داده/نشان‌شده/درصد) now describe the filtered category, and the
+  «همه» tab no longer says 80 while 30 questions are shown.
+- The panel is an inline 358 px column ≥1280 px and a right-side drawer with
+  backdrop below that; the header/search/close button stay put while the list
+  scrolls. `body` classes (`tree-open`, `tree-downloading`) are no longer
+  wiped by a theme switch (`classList`, not `className`).
+- Micro-topics («آسم» …) select their parent topic and say so in the label.
+- **Performance:** the tree is built lazily. Only expanded branches exist in
+  the DOM (157 rows at start instead of 2,594) and a chevron toggles in place
+  — expansion went from **380 ms → 15 ms**; search still renders only matching
+  subtrees.
+
+### Categorization (already in the data, now visible/verified)
+- `questions.category_path` is filled for **80/80** questions:
+  topic 83 → «دستیاری پزشکی » 1405 » قلب » بیماری های پریکارد»,
+  topic 79 → «دستیاری پزشکی » غدد», topic 3 → «پره انترنی » ریه».
+- `/api/tree` returns 7 roots and topic 83 with `30/95` + «ناقص»; selecting
+  it yields «سوال ۱ از ۳۰» and the full breadcrumb on the card.
+- `dist/categories.json` (7 roots) and `dist/questions.json` (80/80 with a
+  path) are regenerated at the end of every run that stores anything.
+
+### Verified
+- `pytest -q` → **117 passed** (dashboard-URL matrix, session check with a
+  fake probe, post-login replay gating, 16 path/log tests).
+- `py_compile` (auth/server/scraper/db) and `node --check app.js` → OK.
+- Live on `127.0.0.1:8094`: auth-status = «redirected to /login…» in ~5 s
+  (was "site unreachable"); tree 7 categories / 150 topics / 157 download
+  buttons; topic filter 30 rows; category filter 60 rows; micro empty state
+  with CTA; search «پریکارد» → 11 rows; drawer + backdrop + Escape; theme
+  switch keeps the panel open.
+
+### Remaining limitations
+- A **real** login was not exercised here (no credentials): the flow is
+  verified up to the guest verdict/URL proof, and the resume has unit tests;
+  the first live login should be watched once in `logs/medo.log`.
+- Site guest quota is exhausted, so scraping stays `auth_required` until the
+  user logs in — expected, not an error.
+- Micro-topic rows expand to the parent topic's questions; per-`?tag=`
+  extraction is still not implemented, so tag-level counts remain site-declared
+  only.
+
+---
+
+# 2026-10-20 — «مرورگر پشتیبانی نمی شود» و لاگینی که تشخیص داده نمی‌شد
+
+## چه چیزی واقعاً رخ داده بود
+
+سه مسئلهٔ جدا که در لاگ‌ها و پروب‌های زنده از هم جدا شدند:
+
+### ۱) محدودیت ضدربات = UA هدلس (قابل رفع بود، رفع شد)
+
+پروب A/B/C روی همان صفحهٔ مبحث:
+
+| حالت | نتیجه |
+|---|---|
+| هدلس، UA پیش‌فرض Playwright | **403** «مرورگر شما برای این صفحه پشتیبانی نمی شود» |
+| هدلس + UA واقعی کروم + stealth | **200**، سوال رندر شد |
+| headed، UA پیش‌فرض | 200 (ولی `navigator.webdriver=true`) |
+
+یعنی سایت به رشتهٔ `HeadlessChrome` در UA و به `navigator.webdriver`
+حساس است، نه به TLS یا رفتار شبکه.
+
+**رفع:** `medo/browser.py` حالا `launch_browser()` را با
+`--disable-blink-features=AutomationControlled` و حذف `--enable-automation`
+اجرا می‌کند و `new_context()` یک کانتکست می‌سازد با:
+
+- UA واقعی همان نسخهٔ کرومِ در حال اجرا (`browser.version`)، هم‌خوان با
+  هدرهای `sec-ch-ua`؛
+- `locale=fa-IR`، `timezone=Asia/Tehran`، `Accept-Language` فارسی؛
+- اسکریپت init برای `navigator.webdriver/plugins/mimeTypes/languages` و
+  `window.chrome` و `permissions.query`.
+
+همهٔ نقاط ساختِ کانتکست (اسکرپر، پروب نشست، پنجرهٔ لاگین، دیسکاوری) از همین
+`new_context()` استفاده می‌کنند. نتیجه: 403 → 200 و فرم واقعی لاگین (تلفن +
+OTP) هم باز می‌شود؛ قبلاً صفحهٔ «در حال انتقال» می‌آمد.
+
+### ۲) «سهمیهٔ مهمان» با «نیاز به لاگین» اشتباه گرفته می‌شد
+
+سایت برای کاربر ناشناس با `?ddos_redirect=true` به `/login` می‌فرستد و
+می‌گوید «درخواست‌های مجاز امروز شما به عنوان کاربر میهمان به پایان رسیده».
+کد قبلی هر ریدایرکت به `/login` را `auth_required` می‌دید.
+
+**رفع:** `classify_page()` حالا `blocked` (صفحهٔ ۴۰۳) را جدا می‌کند و
+`is_guest_quota()` متن سهمیهٔ مهمان را تشخیص می‌دهد؛ نتیجه `limit` با
+detail = `guest quota exhausted` است و پیام UI می‌گوید با «ورود با مرورگر»
+ادامه بدهید یا فردا سهمیه ریست می‌شود. رکورد `resume_after_login()` هم برای
+`limit` فعال شد تا بعد از ورود، دانلود خودکار از صفحهٔ بعد ادامه یابد.
+
+این محدودیت **سمت سرور و بر اساس IP/سهمیهٔ روزانه** است؛ دور زدن آن
+(پروکسی/کوکی جعلی) انجام نشده و نمی‌شود — با یک حساب رایگان (کد پیامک) رفع
+می‌شود.
+
+### ۳) لاگین موفق تشخیص داده نمی‌شد
+
+لاگ ۲۰:۳۰: پنجرهٔ لاگین باز شد، ولی هیچ خط `[login]` بعد از آن نبود؛
+`storage_state.json` هم mtime ۱۸:۳۷ داشت. علت: تشخیص قبلی فقط URL
+`/dashboard` را در تب‌های باز می‌دید. اگر حساب بعد از ورود به **خانه** یا هر
+صفحهٔ دیگری برود (یا ناوبری سمت کلاینت باشد) هیچ سیگنالی دیده نمی‌شد.
+
+**رفع:** `login_interactive()` سه سیگنال دارد و به‌محض دیدن هر کدام فایل را
+می‌نویسد (نه بعد از تایم‌اوت پروب):
+
+1. پاسخ **document** با ۲۰۰ روی `/dashboard...` (اثبات خودِ سایت)؛
+2. URL تب به `/dashboard...` رسیده → همان تب با `fetch` تأیید می‌شود
+   (تب جدید باز نمی‌شود، تمرکز از کاربر گرفته نمی‌شود)؛
+3. `sessionid` عوض شده (Django هنگام ورود rotate می‌کند) و تب از `/login`
+   خارج شده → همان تب با `fetch` تأیید می‌شود. **این همان حالتی است که قبلاً
+   گم می‌شد.**
+
+`/api/auth-status` هم در طول باز بودن پنجرهٔ ورود `authorizing: true` برمی‌گرداند
+تا UI قرمز نشود و بنویسد «در انتظار تأیید ورود…».
+
+## تست‌ها و شواهد
+
+- `tests/test_login_flow.py` (جدید): یک سایت جعلی محلی که مثل همین سایت
+  `sessionid` را rotate می‌کند و کاربر را به **خانه** می‌برد →
+  `login_interactive` تأیید و ذخیره می‌کند؛ حالت مهمان (بدون ورود) تایم‌اوت و
+  فایل ذخیره نمی‌شود.
+- `tests/test_scraper_helpers.py`: صفحهٔ ۴۰۳ → `blocked`، متن سهمیهٔ مهمان →
+  `limit` + `is_guest_quota()`.
+- `tests/test_paths_and_log.py`: ادامهٔ خودکار بعد از توقف `limit`.
+- `pytest -q` → **۱۲۲ passed**؛ `py_compile` و `node --check` پاک.
+- زنده: `POST /api/scrape/start` روی مبحث ۸۳ → `status=limit`
+  (`guest quota exhausted`) به‌جای `auth_required` گمراه‌کننده.
+- زنده: `login_interactive(headless, 12s)` روی سایت واقعی → تأیید نکرد
+  (نتیجهٔ درست، بدون false positive) و فایل نشست دست‌نخورده ماند.
+- پروب‌های زنده: `scripts/probe_fingerprint.py` (مقایسهٔ سه حالت)،
+  `scripts/probe_guest_limit.py`، `scripts/probe_login_page.py`.
+
+## کار بعدی برای کاربر
+
+۱. «ورود با مرورگر» را بزنید؛ پنجرهٔ کروم با فرم واقعی باز می‌شود.
+۲. شماره را وارد کنید، کد پیامک را بزنید. بعد از تأیید، برنامه خودش ادامهٔ
+   دانلود همان مبحث را از صفحهٔ بعد شروع می‌کند و در `logs/medo.log` خط
+   `[login] dashboard response 200 …` یا `[login] confirmed via dashboard …`
+   دیده می‌شود.
+
+# 2026-10-22 — بازبینی سخت‌گیرانه: امنیت، درستی داده، و مسیرهای واقعی
+
+این پاس بدون تغییر رفتار ظاهری انجام شد: هیچ قابلیتی اضافه/حذف نشد، فقط
+جاهایی که برنامه «اشتباه ولی بی‌صدا» کار می‌کرد اصلاح شد. هر مورد با تست یا
+اجرای واقعی تأیید شده است.
+
+## ۱) آرگومان‌های پیش‌فرض به مسیر جاری وابسته بودند
+
+`Path("data/medo.db")` یعنی «هر جا که این لحظه اجرا شده‌ای». با دابل‌کلیک روی
+میان‌بر، اجرا از Task Scheduler، یا باز کردن یک شل دیگر، همان برنامه به یک
+پوشهٔ خالی نگاه می‌کرد: آرشیو «ناپدید» می‌شد و تنظیمات از یاد می‌رفت.
+
+**رفع:** `medo/paths.py` تک‌منبعِ مسیرهاست (ریشهٔ پروژه، `data/`, `dist/`,
+`logs/`). همهٔ پیش‌فرض‌های CLI، سرور، لانچر و PDF از آن می‌آیند؛ آرگومان
+صریح کاربر (و تست‌ها با `tmp_path`) دست‌نخورده می‌ماند. `MEDO_STORAGE_STATE`
+هم مثل قبل اولویت دارد.
+
+## ۲) سرور محلی: چهار مسیر که به بیرون نشت می‌کرد
+
+- **DNS rebinding:** سرور فقط روی `127.0.0.1` گوش می‌داد، اما هر صفحه‌ای در
+  مرورگر می‌توانست دامنهٔ خودش را به لوپ‌بک برساند و `POST /api/*` بزند.
+  حالا `Host` باید یکی از `127.0.0.1`/`localhost`/`[::1]` باشد؛ بدنهٔ
+  خوانده‌نشده هم قبل از ۴۰۳ تخلیه می‌شود تا کلاینت به‌جای خطای شبکه، همان
+  ۴۰۳ را ببیند.
+- **Path traversal:** `GET /assets/../../medo/server.py` فایل پروژه را
+  سرو می‌کرد. حالا مسیر resolve و با `relative_to` محدود می‌شود.
+- **کرش هندلر:** JSON خراب یا `question_id: "abc"` استثنا می‌داد و رشتهٔ
+  درخواست می‌مرد (مرورگر فقط «network error» می‌دید). حالا پاسخ JSON با
+  پیام فارسی برمی‌گردد و سرور زنده می‌ماند.
+- **کش مرورگر:** UI و آرشیو `no-store` می‌گیرند و `index.html` به CSS/JS یک
+  `?b=<mtime>` می‌چسباند؛ قبلاً بعد از هر پچ، پنجره نسخهٔ قبلی را نشان
+  می‌داد. مدیا زیر `/assets/` محتوامحور (SHA-1) است و cacheable می‌ماند.
+
+## ۳) XSS در سانیتایزر HTML
+
+مقدار attribute توسط `HTMLParser` decode می‌شد و بدون escape دوباره در
+خروجی نوشته می‌شد:
+
+```html
+<i class='x" onmouseover="alert(1)'>
+```
+
+یعنی allow-list سانیتایزر با یک نقل‌قول بسته می‌شد و هندلر زنده وارد HTML
+ذخیره‌شده می‌رفت (که UI با `innerHTML` رندر می‌کند). حالا هر مقدار با
+`html.escape(..., quote=True)` سریالایز می‌شود و نام attribute هم فقط
+`[a-zA-Z][a-zA-Z0-9_-]*` است.
+
+## ۴) ایندکس جستجو برای همیشه خراب می‌ماند
+
+FTS5 روی ستون `options_text` تعریف شده بود که در جدول `questions` وجود
+ندارد؛ `CREATE VIRTUAL TABLE IF NOT EXISTS` هم خطا را قورت می‌داد، پس
+جستجو بی‌صدا خالی برمی‌گشت. حالا تعریف قدیمی تشخیص داده و ایندکس بازسازی
+می‌شود؛ تعداد ردیف‌های `questions_fts_docsize` با تعداد سوالات مقایسه
+می‌شود تا فقط وقتی لازم است rebuild شود.
+
+## ۵) تصاویر در PDF و خروجی وب گم می‌شدند
+
+- مارک‌آپ ذخیره‌شده `src` را به فایل محلی تغییر می‌دهد (قبلاً به S3 زنده
+  اشاره می‌کرد؛ آفلاین یا بعد از حذف لینک، تصویر نداشت).
+- `_embed_local_images` حالا علاوه بر `base_dir`، `data/` و ریشهٔ پروژه را
+  هم امتحان می‌کند و MIME را از پسوند خودش می‌سازد (mime سیستم روی این
+  ویندوز `.webp` را اشتباه برچسب می‌زد و تصویر رندر نمی‌شد).
+
+## ۶) پاسخ/بوکمارک نیمه‌وصل بود
+
+UI پاسخ‌ها و نشان‌ها را در `localStorage` نگه می‌داشت و سرور را فقط
+fire-and-forget صدا می‌زد: `POST /api/answer` می‌نوشت ولی هیچ‌وقت خوانده
+نمی‌شد، `/api/bookmark` هیچ‌جا صدا زده نمی‌شد، و `medo stats` همیشه
+«Bookmarked 0» و تعداد تلاش اشتباه نشان می‌داد.
+
+**رفع (بدون شکستن خروجی استاتیک):**
+
+- `/api/answer` سوال و شمارهٔ گزینه را اعتبارسنجی می‌کند (`1..len(options)`)،
+  مقدار `0`/`null` پاسخ را پاک می‌کند، سوال ناموجود رد می‌شود.
+- `/api/bookmark` حالت صریح `bookmarked` را می‌پذیرد (idempotent) تا یک
+  درخواست تکراری نشان را برنگرداند؛ `toggle` فقط برای کلاینت قدیمی می‌ماند.
+- UI هنگام بارگذاری، آرشیو را با `localStorage` ادغام می‌کند (localStorage
+  تازه‌تر است و برنده) و نوشتن‌ها را فقط وقتی سرور سرو می‌کند می‌فرستد؛ روی
+  `file://` هیچ درخواستی زده نمی‌شود.
+
+## شواهد
+
+- `pytest -q` → **۱۵۵ passed** (شامل تست‌های جدید سانیتایزر، API سرور،
+  مسیرها و پایداری لاگ).
+- `compileall` روی `medo/` و `launcher.py` و `node --check medo/web/app.js` پاک.
+- سرور واقعی روی `127.0.0.1:8095`:
+  - `Host: evil.example.com` → ۴۰۳؛ `/assets/../../medo/server.py` → ۴۰۴.
+  - `POST /api/answer` با گزینهٔ ۹ از ۴ گزینه → `ok:false`، دیتابیس
+    دست‌نخورده؛ با `selected_option:0` → `NULL`.
+  - کلیک واقعی روی «نشان‌کردن» → ردیف `bookmarked=1` در `data/medo.db`.
+  - `localStorage.clear()` + رفرش → نشان و پاسخ از آرشیو بازگشتند
+    (`countBookmarked=۱`، یک دکمهٔ نشان‌دار در پالت).
+  - پاسخ با کلیک روی گزینه → `user_selected_option` ذخیره شد؛ «پاسخ مجدد»
+    → `localStorage={}` و سرور `NULL`.
+
+## باقی‌مانده (عمداً رفع نشده)
+
+- سهمیهٔ روزانهٔ مهمان سمت سرور است؛ این پروژه آن را دور نمی‌زند. با یک
+  حساب رایگان و «ورود با مرورگر» رفع می‌شود.
+- ورود/دانلود زنده به Chrome نصب‌شده و اینترنت وابسته است؛ تست‌های CI فقط
+  بخش آفلاین را پوشش می‌دهند.
+- بازسازی ایندکس FTS یک‌بار در هر راه‌اندازی بررسی می‌شود (فقط شمارش، نه
+  rebuild)؛ برای آرشیوهای چندصدهزارتایی اگر کند شد، باید به یک migration
+  نسخه‌دار منتقل شود.
+
+# 2026-10-23 — دسته‌بندی واقعی (زیرمبحث) و ادامه‌دانلود پایدار
+
+## ۱) «همه سوالات یک‌جا بودند»
+
+سایت برای هر مبحث یک نمای «مطالعه مبحثی» دارد: `/qbank/topic-id-N?tag=T`.
+این زیرمبحث‌ها در درخت سایدبار دیده می‌شدند، ولی:
+
+- دانلود همیشه کل مبحث را می‌خواند (`?page=` بدون `tag`)،
+- سوال با `topic_id` ذخیره می‌شد و هیچ attributionی برای زیرمبحث نبود،
+- کلیک روی زیرمبحث هم فقط همان مبحث مادر را فیلتر می‌کرد.
+
+نتیجه: ۱۵۴ سوال نفرولوژی همه در یک سبد، در حالی که سایدبار ده‌ها
+زیرمبحث نشان می‌داد.
+
+**رفع:**
+
+- `questions.tag_id` و `questions.subtopic_title` (migration خودکار؛ سرور
+  حالا خودش `init_db` را اجرا می‌کند، نه فقط CLI).
+- جدول `micro_state(topic_id, tag_id, ...)`: هر زیرمبحث cursor جدا دارد.
+  `scrape_state` مبحث مادر دست‌نخورده می‌ماند.
+- `topic_url(topic_id, page, tag_id)`، `Harvester.scrape_topic(tag_id=...)`،
+  `/api/scrape/start` با `tag_id`/`targets`، و UI با `targets` چندگانه.
+- `get_category_progress` برای نود `?tag=` شمارش و وضعیت همان زیرمبحث را
+  برمی‌گرداند؛ `kind` نودها از URL اصلاح می‌شود
+  (`subtopic`/`topic`/`category`/`section`) نه از عمق crawl.
+- `reconcile_categories()` بعد از هر اجرا/دیسکاور و در استارت سرور:
+  نود گم‌شده می‌سازد و `category_path` سوالات را با درخت جدید هم‌تراز
+  می‌کند (قبلاً درخت و badge سوال با هم اختلاف داشتند).
+- `subtopic_title` از DB خوانده می‌شود، نه از بدنهٔ درخواست (رشتهٔ خراب
+  کلاینت نباید روی ۳۹ سوال بنشیند).
+
+## ۲) «ادامه بعد از لاگین» شکننده بود
+
+مسیر قبلی فقط در حافظهٔ همان پروسه کار می‌کرد؛ سه خطای واقعی دیده شد:
+
+1. **پوزیشن صفحه اشتباه بود.** ویجت سوال چند دکمهٔ «بعدی» تکراری رندر
+   می‌کند و `data-page` دکمهٔ اول کهنه است (۱۴ در حالی که صفحه
+   «سوال ۲ از ۳۹» بود). بعد از لاگین، resume با
+   «topic shorter than resume target» تمام می‌شد و زیرمبحث ۱ از ۳۹
+   «کامل» ثبت می‌شد.
+2. **کلیک روی دکمهٔ پنهان/کهنه** intercept می‌شد و اسکرپر فکر می‌کرد
+   لیست تمام شده.
+3. **درخواست ادامه** با ری‌استارت سرور از بین می‌رفت.
+
+**رفع:**
+
+- منبع حقیقت پوزیشن، شمارندهٔ خود صفحه است (`سوال N از M`)، با پشتیبانی
+  ارقام فارسی. `_position_at` پوزیشن واقعی را برمی‌گرداند (نه درخواستی)،
+  `-1` یعنی واقعاً آخر لیست، `None` یعنی عدم قطعیت.
+- `_click_next` از آخرین دکمه به اول تلاش می‌کند و تغییر fingerprint را
+  چک می‌کند؛ `_next_state` هم از شمارنده استفاده می‌کند.
+- صفحهٔ خالی دیگر «completed» نیست؛ `paused` می‌شود تا آرشیو و ادامه‌دانلود
+  حفظ شوند.
+- `run_request` در DB ذخیره می‌شود (targets + max_pages) و فقط وقتی همهٔ
+  هدف‌ها complete شدند پاک می‌شود. `resume_after_login` بعد از ری‌استارت هم
+  همان دانلود را ادامه می‌دهد؛ هدف‌های تمام‌شده حذف می‌شوند.
+- اگر لاگین وقتی اجرای قبلی هنوز در حال بسته‌شدن است تأیید شود،
+  `_resume_pending` باعث می‌شود همان worker در پایانش ادامه را شروع کند
+  (قبلاً دو مرورگر/دو اجرا یا هیچ‌کدام).
+- `/api/scrape/resume` + دکمهٔ «ادامه دانلود نیمه‌تمام» در مودال، و
+  `/api/scrape/status` حالا `can_resume`/`pending` را از همان درخواست
+  ذخیره‌شده می‌خواند (نه همهٔ cursorهای قدیمی آرشیو).
+
+## ۳) سایدبار حالا آرشیو را نشان می‌دهد
+
+- تب «بانک من» (پیش‌فرض) فقط دسته‌هایی را نشان می‌دهد که سوال دارند، با
+  شمارش درست؛ تب «همه دسته‌ها» درخت کامل سایت برای دانلود است.
+- زیرمبحث‌ها قابل کلیک و قابل دانلود جداگانه‌اند؛ breadcrumb سوال هم نام
+  زیرمبحث را نشان می‌دهد.
+- شمارش‌ها برای زیرمبحث از `micro_state`/`tag_id` می‌آید (۱/۳۹)، برای مبحث
+  از همهٔ سوالات آن (شامل زیرمبحث‌ها).
+
+## شواهد
+
+- `pytest -q` → **۱۶۸ passed** (۱۲ تست جدید: cursor زیرمبحث، حفظ attribution،
+  progress، kind، pending/resume، شمارندهٔ صفحه).
+- `compileall` و `node --check medo/web/app.js` پاک.
+- زنده روی `127.0.0.1:8095` (حساب واردشده):
+  - دانلود زیرمبحث ۹۴/۱۷۸۱ → سوال با `tag_id=1781` و
+    `subtopic_title=نفرولوژی و اورولوژی` ذخیره شد.
+  - «ادامه دانلود» → «ادامه از صفحه ۲»، ۱ سوال ذخیره و وضعیت `paused`
+    ماند (نه completed)، `can_resume` روشن.
+  - مرورگر: تب بانک من ۲۳۷ سوال / ۶ مبحث، کلیک زیرمبحث → «سوال ۱ از ۱»
+    با breadcrumb «تالیفی بالین » اطفال » نفرولوژی و اورولوژی»، کلیک
+    «نفرولوژی» → ۱۵۴ سوال، تب همه دسته‌ها → ۲۳۷ ردیف.
+  - `dist/questions.js` شامل `subtopic_title` و `dist/categories.json` شامل
+    progress زیرمبحث است (خروجی آفلاین هم همان رفتار را دارد).
+
+## باقی‌مانده
+
+- تصویرگرفتن از Preview در این نشست همچنان با «no frames» شکست می‌خورد؛
+  تأیید از DOM و API انجام شد.
+- یک سوال از زیرمبحث و دو سوال از مبحث ۳ (ریه) در جریان همین بررسی زنده
+  ذخیره شد؛ دادهٔ تستی جداست و حذف نشد.
+
+# 2026-10-24 — PDF دسته‌بندی‌شده، حجم اینترنت زنده، رفع دکمهٔ شروع مودال
+
+## ۱) PDF حالا ساختار آرشیو را دارد
+
+- سوال با مسیر کامل گره در درخت به بخش نسبت داده می‌شود: دانلود از
+  زیرمبحث (`?tag=`) در بخش همان زیرمبحث می‌نشیند، نه فقط مبحث مادر.
+  مسیرها از خود درخت خوانده می‌شوند (`build_topic_paths`)، بنابراین
+  تغییر نام/جابه‌جایی دسته هم درست چاپ می‌شود.
+- ترتیب بخش‌ها = پیمایش depth-first درخت (مثل سایدبار)، نه ترتیب topic-id.
+- صفحهٔ **فهرست مطالب** اضافه شد: شمارهٔ بخش، مسیر کامل، تعداد سوال و
+  جمع کل. شمارهٔ صفحه چاپ نمی‌شود (Chromium در حالت PDF شماره صفحهٔ
+  هدف لینک را نمی‌دهد و عدد ساختگی بدتر از نبودنش است).
+- شماره‌گذاری سوال‌ها بعد از مرتب‌شدن بخش‌ها انجام می‌شود، پس سوال اول
+  کتاب «۱» است و کلید پاسخ هم همان ترتیب را دارد (قبلاً شماره‌ها با
+  ترتیب چاپ ناهماهنگ می‌شدند).
+- کارت «توضیحات تشریحی ثبت نشده است» برای هر سوال حذف شد. یک جملهٔ
+  جمعی بالای بخش سوم می‌گوید چند سوال پاسخ تشریحی ندارند؛ کلید آن‌ها
+  در بخش دوم هست. روی آرشیو فعلی (۲۳۳ سوال بدون پاسخ تشریحی) حجم PDF
+  از ۲٬۱۵۳٬۰۰۳ به ۱٬۸۶۶٬۷۳۰ بایت رسید.
+
+## ۲) مصرف اینترنت — زنده، قبل و در حین دانلود
+
+- `Harvester` از قبل `bytes_total` را از هدر `Content-Length` پاسخ‌ها
+  می‌شمرد. حالا:
+  - هر سوال مصرف خودش را در `questions.download_bytes` ذخیره می‌کند
+    (ری‌اسکرپ بدون اندازه‌گیری مقدار قبلی را پاک نمی‌کند).
+  - هر اجرا یک ردیف در `usage_log` می‌نویسد (bytes/questions/status/targets)
+    تا «امروز چقدر مصرف شد» بعد از ری‌استارت هم بماند.
+- `/api/scrape/status` حالا `usage` دارد: `run_bytes` (همان لحظه، از
+  Harvester)، `today_bytes/questions` (ردیف‌های امروز + اجرای جاری)،
+  `avg_question_bytes` و `estimated_bytes/questions` برای باقی دانلود.
+- میانگین از «کل ترافیک ÷ کل سوال» اجراهای ≥۳ سوالی می‌آید؛ اجرای
+  ۱–۲ سوالی کنار گذاشته می‌شود چون بار اول اپ‌شل/فونت/استارتاپ را هم
+  شامل می‌شود و تخمین را چند برابر می‌کرد.
+- UI: در مودال، قبل از شروع «میانگین هر سوال» و «حجم تقریبی این مبحث»
+  با تعداد سوالِ اعلامی سایت؛ در حین اجرا هر ۱٫۲ ثانیه
+  «مصرف اینترنت: X (N سوال)» + تخمین تا پایان + مصرف امروز.
+- با ری‌استارت، عدد اجرای قبلی از حافظه رفته ولی «مصرف امروز» می‌ماند.
+
+## ۳) دو باگ واقعی که در تست زنده پیدا شد
+
+- **دکمهٔ «شروع دانلود سوالات» مودال کار نمی‌کرد.** دو تابع هم‌نام
+  `startScrape` وجود داشت (فرم و درخت)؛ اعلان تابع دوم اولی را hoist
+  می‌کرد و هندلر دکمه با `targets=undefined` فوراً برمی‌گشت. فرم به
+  `startScrapeFromForm` تغییر نام داد.
+- **`serve --db` وضعیت را از آرشیو پیش‌فرض می‌خواند** تا وقتی اولین
+  اسکرپ شروع شود (چون `SCRAPER_CONTROLLER.db_path` ست نمی‌شد). حالا در
+  `serve()` ست می‌شود.
+- شمارندهٔ بایت هر سوال در ابتدای حلقه صفر می‌شد؛ پاسخ صفحهٔ بعد که قبل
+  از شروع تکرار می‌رسید دور ریخته می‌شد. حالا صفر شدن فقط بعد از ثبت
+  سوال انجام می‌شود.
+
+## شواهد
+
+- `pytest -q` → **۱۸۳ passed** (۱۵ تست جدید: TOC/ترتیب/شماره‌گذاری PDF،
+  حذف کارت‌های تکراری، usage_log، میانگین، وضعیت usage، شمارش بایت).
+- `node --check medo/web/app.js` و `compileall` پاک.
+- PDF واقعی: ۲۳۷ سوال در ۵ بخش، شماره‌ها ۱..۲۳۷ پیوسته، فهرست با ۵ ردیف،
+  کلید پاسخ از سوال ۱ شروع می‌شود.
+- تست زنده روی سرور موقت با کپی دیتابیس (تا آرشیو اصلی دست نخورد):
+  - `run_bytes` در حین اجرا ۰ → ۳۵۲k → ۴۲۵k و مصرف امروز هم‌زمان بالا رفت.
+  - مودال در حین اجرا: «مصرف اینترنت: ۸۶۰ کیلوبایت (۱ سوال)».
+  - بعد از اجرا: «آخرین اجرا: ۸۶۰ کیلوبایت برای ۴ سوال»، میانگین ۲۴۵k،
+    تخمین ۲۸۷ مگابایت برای ۱۱۹۹ سوال، امروز ۳٫۸ مگابایت.
+  - قبل از شروع: «این مبحث (۱۲۱۲ سوال): ~۲۹۰٫۶ مگابایت».
+- عرض مودال در موبایل (۴۳۹px) بدون اسکرول افقی شد (۲۶۸=۲۶۸)؛ برای
+  `.form-check`/`.tree-select-row`/`.form-hint` که هیچ CSS نداشتند قاعده
+  اضافه شد.
+
+## باقی‌مانده
+
+- تخمین بر اساس میانگین واقعی است و با هر اجرا دقیق‌تر می‌شود؛ تا قبل از
+  اولین اجرای ≥۳ سوالی عدد تخمین نمایش داده نمی‌شود (عمدی).
+- مصرف اینترنت فقط ترافیک همین مرورگر/اسکرپر را می‌شمارد، نه دانلودهای
+  دیگر سیستم.
+- برای تست، سه سوال دیگر از مبحث ۹۴ در یک کپی موقت از دیتابیس دانلود شد؛
+  آن کپی حذف شد و آرشیو اصلی تغییری نکرد.
+
+# 2026-10-24 (ادامه) — رفع «حجم ثابت» و کرش پایان اجرا
+
+## ۱) کرش «sleep length must be non-negative»
+- در `_polite_delay` بین چک `time.monotonic() < end` و `sleep(end - now)` مسابقه بود؛
+  در پایان تأخیر مقدار منفی می‌شد و کل اجرا با `ValueError` می‌افتاد
+  (لاگ ۱۸:۳۳:۲۵). حالا `remaining` محاسبه و فقط اگر مثبت بود خوابیده می‌شود.
+- همین کرش باعث می‌شد `res` از `scrape_topic` برنگردد و `usage_log.questions=0`
+  شود، در حالی که ۴۰ سوال ذخیره شده بود. حالا `run_questions` از
+  `max(total_saved, scraped_count)` می‌آید تا اجرای نیمه‌کاره هم شمارش شود.
+
+## ۲) چرا عدد حجم ثابت می‌ماند
+- فقط `Content-Length` شمرده می‌شد. سایت صفحهٔ سوال بعدی را با `fetch` و
+  Cache API (`pages-v16`) می‌آورد؛ آن پاسخ‌ها هدر length ندارند و
+  `responseBodySize` منفی (بدون انتقال شبکه) گزارش می‌شود. نتیجه: فقط
+  بار اول شمرده می‌شد و عدد می‌ایستاد.
+- حالا `Request.sizes()` (بدنه + هدر) و اگر بدنه در دسترس نبود
+  `resp.body()` (محتوای کش‌شده) شمرده می‌شود؛ پس با هر صفحهٔ تازه عدد
+  جلو می‌رود. تست زنده: ۳۹۱k → ۸۳۰k → ۸۴۴k → ۸۵۹k در ۳ سوال.
+
+## ۳) میانگین «هر سوال» که کم می‌شد
+- میانگین زنده = «حجم تا اینجا ÷ تعداد سوال تا اینجا» بود؛ چون سایت
+  صفحه‌ها را دسته‌ای prefetch می‌کند، با هر سوال کوچک‌تر می‌شد و شبیه باگ
+  دیده می‌شد. حالا میانگین/تخمین فقط از اجراهای تمام‌شدهٔ `usage_log`
+  می‌آید و در طول اولین اجرا UI می‌گوید «پس از پایان این اجرا محاسبه می‌شود».
+- تست زنده: ردیف `usage_log` با ۳ سوال و ۸۵۹٬۸۱۷ بایت ثبت شد؛
+  میانگین ۲۸۶٬۶۰۵ و تخمین ۳۴۶ مگابایت برای ۱۲۰۸ سوال (پایدار).
+
+## شواهد
+- `pytest -q` → **۱۸۷ passed** (تست‌های `_response_bytes` شامل بدنهٔ کش‌شده،
+  fallback هدر، و `_polite_delay` بدون تأخیر منفی).
+- سرور ۸۰۹۵ با کد جدید بالا آمد؛ درخواست نیمه‌تمام کاربر (مبحث ۷۹) دست‌نخورده
+  و قابل ادامه است.
+
+# ۲۱) اپ اندروید — بدون Gradle، با همان ابزارهای tools/
+
+## چه چیزی ساخته شد
+- `medo/share.py`: بانک را به یک فایل `.medo` (JSON فشرده، UTF-8) تبدیل می‌کند
+  و یک سرور **فقط‌خواندنی** برای وای‌فای بالا می‌آورد (سه مسیر: `/`،
+  `/medo.medo`، `/health`). سرور اصلی تمرین دست‌نخورده مانده چون مسیرهای
+  تغییردهنده دارد و Host غیرلوکال را رد می‌کند.
+- CLI: `medo build-bank` (فایل برای کابل) و `medo share` (وای‌فای/USB).
+- `android/`: اپ جاوا، بدون AndroidX، تمام UI در کد.
+  - درخت دسته‌بندی با باز/بسته‌شدن و شمارش هر گره (از ایندکس، نه فیلتر کامل).
+  - آزمون با بازخورد فوری، پاسخ تشریحی، ستاره‌کردن، پاک‌کردن پاسخ، خلاصهٔ نتیجه.
+  - PDF از بخش انتخابی با `PrintManager` + `PrintedPdfDocument` (بدون کتابخانه).
+  - دریافت بانک: فایل از file picker یا HTTP از `medo share`؛ برای کابل
+    `adb reverse tcp:8765 tcp:8765`.
+  - همان سرور `medo share` فایل APK را هم با صفحهٔ نصب دو مرحله‌ای می‌دهد
+    (`GET /medo.apk`)، تا نصب از مرورگر گوشی بدون کابل انجام شود.
+  - پیشرفت (پاسخ/ستاره) در `filesDir/state.json` و با نوشتن اتمیک.
+
+## ساخت و تست
+- `bash android/build.sh` → `dist/medo.apk` (~۴۰ کیلوبایت)، امضاشده با
+  `android/medo-debug.keystore` (یک‌بار ساخته می‌شود؛ برای آپدیت نگهش دار).
+- `bash android/test.sh` منطق اپ را روی JVM اجرا می‌کند (بدون امولاتور).
+
+## شواهد
+- `pytest -q` → **۲۰۲ passed** (۱۵ تست تازه برای فرمت بانک، سرور share و
+  سرو کردن APK).
+- `android/test.sh` → **۷۷ checks** روی بانک واقعی: ۲۶۴ سوال در ۱۳۲ms پارس شد.
+- `aapt2 dump badging`: `package=ir.medo.app`, `sdkVersion=21`, `targetSdk=30`,
+  label «مدو»؛ `apksigner verify`: گواهی معتبر.
+- `classes.dex` شامل MainActivity/QuizActivity/PdfExporter/MiniJson/… است.
+
+## محدودیت‌های شناخته‌شده
+- تصاویر سوال داخل بانک نمی‌روند (فقط متن)؛ سوال تصویردار بدون شکل نمایش
+  داده می‌شود. برای اضافه‌کردنشان باید assets در `.medo` و decode در اپ بیاید.
+- جستجوی متن در اپ نیست (در نسخهٔ وب هست).
+- اپ با گرفتن `<uses-permission INTERNET>` فقط به همان LAN وصل می‌شود؛
+  هیچ درخواستی به اینترنت نمی‌رود.
+
+# ۲۲) ارتقای UI/UX هر دو اپ (اندروید + دسکتاپ)
+
+## ایجنت‌های مرجع
+از `github.com/msitarzewski/agency-agents` (MIT) شش ایجنت مرتبط در
+`agents/agency/` نگه داشته شد:
+`design-ui-designer`، `design-ux-architect`، `design-persona-walkthrough`،
+`design-ui-finish-gate-reviewer`، `engineering-mobile-app-builder`،
+`engineering-desktop-app-engineer`.
+قرارداد طراحی در `docs/design-contract.md`: لنز محصول، تصمیم‌های عمدی،
+ممنوعیت‌ها، توکن‌های مشترک، حالت‌های هر صفحه و معیار پذیرش.
+
+## اپ اندروید
+- `Ui.java`: توکن‌های رنگ/فاصله/شعاع/تایپ، هدف لمسی ۴۸dp، اعداد فارسی،
+  احترام به «کاهش انیمیشن» سیستم.
+- `MainActivity.java`: هدر عنوان + نوار آمار (سوال/پاسخ/دقت) + جستجو +
+  حالت خالی با سه قدم و دستور `medo share` + کارت «ادامهٔ آخرین بخش» + درخت.
+- `QuizActivity.java`: بازخورد فوری، پاسخ تشریحی، ستاره، پاک‌کردن پاسخ، خلاصه.
+- خروجی: `bash android/build.sh` → `dist/medo.apk` (۴۴ کیلوبایت، امضاشده)؛
+  `bash android/test.sh` → **۷۷ checks** روی بانک واقعی (۳۰۸ سوال).
+
+## اپ دسکتاپ (وب)
+- **هدر دو ردیفی زیر ۹۰۰px**: ردیف اول برند+کنترل‌ها، ردیف دوم جستجوی تمام‌عرض.
+  پیش‌تر جستجو با `display:none` حذف می‌شد و کنترل‌ها تا `x=-94` بیرون می‌زدند.
+- **پالت سوالات** در موبایل کشوی چپ با backdrop شد (قبلاً بلوکی زیر کارت بود و
+  صفحه را چهار صفحه بلند می‌کرد)؛ در دسکتاپ همان پنل درون‌خط می‌ماند و با
+  عبور از بریک‌پوینت خودش را باز/بسته می‌کند.
+- ارتفاع هدر با `ResizeObserver` اندازه‌گیری و در `--nav-h` نوشته می‌شود،
+  بنابراین کشوها دقیقاً زیر هدر می‌نشینند.
+- **کارت‌های حالت** به‌جای پاراگراف خالی: اسکلت بارگذاری، «هنوز سوالی ذخیره نشده»
+  (با دکمهٔ دانلود و دستور ترمینال)، «سرور محلی پاسخ نمی‌دهد» (با تلاش دوباره)،
+  و «موردی پیدا نشد» با پاک‌کردن جستجو/فیلتر.
+- **کنتراست**: `--text-dim` روشن از ۲٫۱:۱ به ۴٫۶:۱ و تیره از ۳٫۴:۱ به ۶٫۱:۱؛
+  دکمه‌های پرشده از `--accent-fill` استفاده می‌کنند (سفید ۵٫۴۵:۱ در برابر ۳٫۹۹:۱).
+- **دسترس‌پذیری**: حلقهٔ `:focus-visible`، لینک پرش به سوال، `aria-expanded`
+  برای هر دو کشو، `tabindex="-1"` روی کارت سوال، احترام به
+  `prefers-reduced-motion`، و `theme-color` هم‌گام با تم.
+- **خوانایی**: عرض ۷۴ch برای صورت سوال، `line-height: 2`، حداقل ۵۶px برای گزینه،
+  و فاصله‌گذاری/شعاع از مقیاس مشترک.
+- باندل استاتیک دیگر `/api/auth-status` را صدا نمی‌زند (۴۰۴ بی‌مورد در کنسول).
+
+## شواهد
+- `pytest -q` → **۲۰۲ passed**؛ `pytest -q tests/test_web_export.py` → **۱۰ passed**.
+- `node --check medo/web/app.js` → سالم.
+- مرورگر در ۳۹۰/۷۲۰/۱۴۴۰: سرریز افقی **۰**، جستجو دیده می‌شود، پالت و درخت
+  سر جای خود، **۴ گزینه** و «سوال ۱ از ۳۲۳» رندر می‌شود.
+- خروجی `medo build-web` روی ۸۱۰۰: بدون خطای شبکه، ۳۲۳ سوال، بدون کارت حالت.
+- کارت «سرور پاسخ نمی‌دهد» با توقف سرور و کارت «بانک خالی» با
+  `questions.json = []` واقعاً رندر شدند (دکمه‌ها و قفل‌شدن ناوبری بررسی شد).
+
+# ۲۳) ظاهر تازهٔ دسکتاپ + پنجرهٔ «گوشی» (وای‌فای/USB/APK)
+
+## چرا این بخش اضافه شد
+کاربر گفت تفاوت ظاهری دسکتاپ کم است و امکان اتصال به گوشی (وای‌فای یا کابل)
+و به‌روزرسانی APK از داخل برنامه وجود ندارد. هر دو اکنون هست.
+
+## ظاهر (v3)
+- هدر ۷۲px با لوگوی ۴۲px، جستجوی ۴۴px، دکمه‌های ۴۲px و سایهٔ ملایم؛
+  پس‌زمینهٔ بوم با دو هالهٔ رنگ ملایم (روشن/تیره) تا از «صفحهٔ سفید» جدا شود.
+- **نوار جلسه** بالای کارت: «۲ از ۳۲۳ پاسخ داده» + نوار پیشرفت + دقت.
+- کارت سوال با شعاع ۱۸px و سایهٔ عمیق‌تر، بج‌های کپسولی، حروف گزینه
+  ۳۰px که در hover/درست/غلط پر می‌شوند، و توضیح با هدر تازه.
+- پالت و درخت با سطح `--bg-secondary` و گوشه‌های ۹/۱۰px.
+- چیدمان موبایل حفظ شد (هدر دو ردیفی) و قوانین کوچک‌صفحه بعد از لایهٔ v3
+  دوباره تأکید شده‌اند تا لایهٔ دسکتاپ آن‌ها را خنثی نکند.
+
+## پنجرهٔ «گوشی» (سرور + UI)
+- `PhoneBridge` در `medo/server.py` سرور `medo/share.py` را در همان پروسه
+  بالا/پایین می‌کند؛ مسیرها (همه پشت بررسی Host لوکال):
+  - `GET /api/phone` → وضعیت، پورت، **همهٔ** آدرس‌های LAN، حجم/تاریخ بانک و APK،
+    وضعیت ساخت.
+  - `POST /api/phone/start|stop` — روشن/خاموش‌کردن انتقال.
+  - `POST /api/phone/bundle` — ساخت بانک تازه و ری‌استارت سرور اشتراک.
+  - `POST /api/phone/build-apk` — اجرای `android/build.sh` در نخ جداگانه با لاگ.
+  - `GET /api/phone/apk|bank` — دانلود مستقیم APK و فایل بانک.
+- UI: دکمهٔ «گوشی» در هدر، مودال سه‌بخشی (وای‌فای، USB، APK) با:
+  - فهرست آدرس‌های زنده (هر ۴ ثانیه به‌روز می‌شود) و دکمهٔ کپی برای هرکدام؛
+    وقتی سرور خاموش است همان آدرس‌ها با برچسب «پس از روشن‌کردن» نشان داده می‌شوند.
+  - دستور `adb reverse tcp:8765 tcp:8765` با کپی.
+  - دانلود بانک (برای کابل) و دانلود APK.
+  - «ساخت APK تازه» + نمایش لاگ ساخت و وضعیت موفق/ناموفق.
+- چند آدرس LAN نمایش داده می‌شود چون لپ‌تاپ با VPN/VMware چند آداپتور دارد و
+  فقط آدرس هم‌شبکه با گوشی کار می‌کند.
+
+## شواهد
+- `pytest -q` → **۲۰۷ passed** (۵ تست تازه در `tests/test_phone_bridge.py`:
+  شکل وضعیت، start/stop روی پورت موقت، دانلود APK با هدر attachment،
+  پاسخ ۴۰۴ فایل غایب، و رد ساخت هم‌زمان).
+- `node --check medo/web/app.js` سالم؛ CSS متوازن (۳۸۶/۳۸۶).
+- شروع انتقال از خود UI: `آمادهٔ انتقال — ۳۲۳ سوال`، پورت ۸۷۶۵؛
+  `http://127.0.0.1:8765/` و `/medo.apk` هر دو ۲۰۰.
+- «به‌روزرسانی بانک» → ۱٬۲۱۰٬۴۹۲ بایت و ری‌استارت سرور بدون قطع وضعیت.
+- «ساخت APK تازه» → `building=true` سپس `build_ok=true` و mtime تازه
+  (`dist/medo.apk`, ۴۵٬۵۲۱ بایت)؛ لاگ ساخت در مودال دیده شد.
+- ۱۴۴۰px: هدر ۷۲px، نوار جلسه ۶۸px→کوتاه‌تر، کارت شعاع ۱۸px، سرریز ۰.
+- ۳۹۰px: هدر دو ردیفی ۹۹px، جستجو ۳۵۱px، سرریز ۰، چهار گزینه رندر می‌شود.
+- خروجی `build-web` تازه در مرورگر: ۳۲۳ سوال، بدون خطای شبکه.
+
+# ۲۴) اصلاح خانهٔ اندروید + فهرست سوال‌ها + QR
+
+## باگ عکس: پنل غول‌آسا
+`stats` با `Ui.card` (LinearLayout **عمودی**) ساخته می‌شد و فرزندانش با
+`weight(1f)` اضافه می‌شدند. در والد عمودی، weight یعنی ارتفاع: نوار آمار
+کل ارتفاع صفحه را گرفت، سه ستون عرض صفر شدند و فقط دو جداکنندهٔ ۱dp
+دیده می‌شد — همان کادر بزرگ خالی. حالا `stats` یک `Ui.row` است.
+
+## خانهٔ تازه (MainActivity)
+- ترتیب: عنوان + ⇩ دریافت بانک → نوار آمار سه‌ستونی → جستجو → دو دکمه
+  («همهٔ سوال‌ها» / «آزمون تصادفی») → کارت ادامه → فهرست → راهنما.
+- لمس هر گره‌ای که سوال دارد = **فهرست سوال‌ها**؛ فلش جداگانه باز/بسته می‌کند.
+- نگه‌داشتن = منو (دیدن سوال‌ها / آزمون بخش / PDF).
+
+## BrowseActivity (جدید)
+- فهرست سوال‌های یک مبحث یا کل آرشیو، با جستجو در متن سوال و گزینه‌ها،
+  فیلتر «همه/بی‌پاسخ/ستاره‌دار/غلط»، وضعیت درست/نادرست هر ردیف، مسیر مبحث.
+- لمس ردیف = باز شدن آزمون از **همان سوال** (`EXTRA_START_INDEX` + `Quiz.goTo`).
+- درصد رأی سایت هر گزینه (همان عددی که دسکتاپ نشان می‌دهد) حالا از بانک
+  خوانده و کنار گزینه نمایش داده می‌شود (`Question.votes`).
+- دکمهٔ «شروع آزمون از این فهرست»، PDF از فهرست فیلترشده، شمارش پاسخ‌داده.
+
+## QR (دسکتاپ)
+- کتابخانهٔ MIT `qrcode-generator` (Kazuhiko Arase) در `medo/web/vendor/qrcode.js`
+  باندل شد (آفلاین، بدون CDN) و در `medo/exporter.py` هم کپی می‌شود.
+- در مودال گوشی، QR آدرس **زنده** را نشان می‌دهد؛ هر ردیف دکمهٔ QR دارد و
+  انتخاب کاربر بین پول‌ها (هر ۴ ثانیه) حفظ می‌شود. با خاموش شدن سرور پنهان می‌شود.
+
+## شواهد
+- `pytest -q` → **۲۰۸ passed**؛ `android/test.sh` → **۸۲ checks**
+  (سه بررسی `goTo` و دو بررسی درصد رأی).
+- `bash android/build.sh` → `dist/medo.apk` (۴۸ کیلوبایت) شامل BrowseActivity.
+- مرورگر: بعد از Start، `#phoneQrWrap` با SVG (viewBox 108×108) ظاهر شد؛
+  کلیک QR روی آدرس دوم برچسب را به `http://10.67.195.246:8765` برد و بعد از
+  ۵ ثانیه (یک دور polling) همان ماند.
+- خروجی استاتیک `build-web` با `vendor/qrcode.js`: بدون ۴۰۴، `window.qrcode` تابع،
+  ۳۲۳ سوال رندر شد.
+- تست تازهٔ `test_qr_library_is_bundled_and_exported` (باندل + کپی در خروجی).
+
+# ۲۵) منوی مبحث، PDF واقعی، اسکنر QR، زیرمبحث‌ها و سوالات بی‌پاسخ
+
+## ۱) منوی مبحث در موبایل
+- هر ردیف حالا دکمهٔ **⋯** دارد (۴۸dp) و نگه‌داشتن روی خود ردیف هم همان
+  منو را باز می‌کند؛ قبلاً فقط ListView long-click بود و روی گوشی پیدا/فعال
+  نمی‌شد.
+- منو: دیدن سوال‌ها، آزمون بخش، PDF بخش، باز/بستن زیرشاخه‌ها.
+- زیرمبحثی که سوال ندارد (چون فقط مبحث والد دانلود شده) دیگر بن‌بست نیست:
+  دیالوگ می‌گوید داخل کدام مبحث است و «دیدن سوال‌ها»/«آزمون» والد را باز می‌کند.
+
+## ۲) PDF واقعی در موبایل
+- مسیر قبلی `PrintManager.print()` بود؛ روی ROMهای بدون print spooler هیچ
+  اتفاقی نمی‌افتاد. حالا `android.graphics.pdf.PdfDocument` مستقیم A4
+  می‌سازد (StaticLayout با جهت RTL، سربرگ/شماره صفحه، گزینهٔ صحیح سبز،
+  پاسخ تشریحی) و فایل را در Documents برنامه می‌نویسد.
+- سپس دیالوگ «اشتراک‌گذاری / باز کردن / باشه»؛ دسترسی فایل با
+  `SharedFileProvider` (ContentProvider حداقلی، فقط نام‌های ساختهٔ خود اپ).
+- ساخت در ترد جدا با ProgressDialog، تا فهرست ۳۲۳ سوالی UI را قفل نکند.
+
+## ۳) اسکنر QR در موبایل
+- `ScanActivity` با Camera1 (minSdk 21) + `zxing-core 3.5.3` که به‌صورت
+  آفلاین در `android/libs/zxing-core.jar` باندل شده (۲۹۱ کلاس، ۶۰۷KB).
+- مجوز دوربین در زمان اجرا؛ نبود دوربین/رد مجوز = پیام + مسیر دستی.
+- `ScanTarget`: هر URL با `.apk`/`/medo.apk` → به‌روزرسانی برنامه؛
+  در غیر این صورت بانک دانلود می‌شود. نصب APK با FileProvider و
+  `REQUEST_INSTALL_PACKAGES` و راهنمای «نصب برنامه‌های ناشناس».
+- سمت دسکتاپ: دکمهٔ «QR نصب/به‌روزرسانی» در بخش APK، QR را روی
+  `http://<lan>:8765/medo.apk` می‌سازد؛ QR آدرس هم مثل قبل بانک را می‌دهد.
+
+## ۴) زیرمبحث‌ها (علت و درمان)
+- علت: سرور برای هر زیرمبحث `?tag=` را جدا ذخیره می‌کند و
+  `questions.tag_id` را پر می‌کند؛ اما بانک فعلی از صفحهٔ **بدون فیلتر**
+  مبحث دانلود شده، پس همهٔ ۲۱۳ سوال «نفرولوژی» بدون tag ذخیره شده‌اند و
+  ۱۰ زیرمبحث آن (۳۵ تا ۶۷ سوالی) خالی‌اند. این در دادهٔ فعلی با هیچ
+  محاسبهٔ محلی قابل تقسیم نیست (سایت هیچ برچسبی در HTML سوال نمی‌گذارد).
+- وب: روی ردیف مبحثی که زیرمبحث‌های خالی دارد دکمهٔ **تفکیک** اضافه شد که
+  همهٔ زیرمبحث‌های خالی را با tag به صف دانلود می‌فرستد؛ کلیک روی زیرمبحث
+  خالی هم پیام «داخل مبحث والد» + دکمهٔ «نمایش N سوال والد» می‌دهد.
+- موبایل: `Bank.nearestWithQuestions` + دیالوگ والد (بالا).
+- هر دو اپ حالا «۰ از ۳۹» را جدا از «۳۹» نشان می‌دهند، نه یک عدد گمراه‌کننده.
+
+## ۵) سوالات بدون پاسخ (۶۷ از ۳۲۳)
+- بررسی: `correct_index IS NULL` برای ۶۷ سوال (۲۰.۷٪) و
+  `answer_source='unknown'`؛ خروجی `dist/medo.medo` همان NULL را
+  منتقل می‌کند (تست `test_bank_keeps_answers_and_flags_missing`).
+  یعنی باگ خروجی نیست: در آن اجرا سایت پاسخ/تشریح را باز نکرده است.
+- رفتار غلط اما از خود اپ بود: هر گزینه «نادرست» رنگ می‌گرفت. حالا در هر دو
+  اپ انتخاب کاربر برای سوال بدون پاسخ قرمز نمی‌شود، در دقت حساب نمی‌آید،
+  و پیام «پاسخ در بانک نیست؛ غلط شمرده نمی‌شود» نمایش داده می‌شود.
+  موبایل درصد رأی سایت را هم به‌عنوان سرنخ نشان می‌دهد.
+- پارسر: تشخیص پاسخ از «پاسخ صحیح: گزینهٔ ۲»، «گزینه ۴ صحیح است»،
+  ارقام فارسی، کلاس/data صحیح (`is-correct`, `fa-check`, `data-correct`)
+  اضافه شد؛ اگر بیش از یک گزینه علامت داشته باشد هیچ پاسخی ثبت نمی‌شود.
+  با این حال ۶۷ سوال فعلی فقط با دانلود دوبارهٔ همان ۴ مبحث (وقتی سایت
+  در دسترس است) پر می‌شوند؛ شبکهٔ این دستگاه medofast.ir را به
+  198.18.0.94 (blackhole) resolve می‌کند.
+
+## شواهد
+- `pytest -q` → **۲۱۵ passed** (۶ تست تازهٔ پاسخ + ۱ تست بانک).
+- `android/test.sh` → **۱۰۱ checks** (ScanTarget، والد زیرمبحث، عدم تصحیح
+  سوال بی‌پاسخ، رأی‌ها).
+- `android/build.sh` → `dist/medo.apk` **۲۷۶KB**؛ `classes.dex` شامل
+  ScanActivity/SharedFileProvider/zxing است؛ manifest مجوز CAMERA و
+  REQUEST_INSTALL_PACKAGES و provider دارد.
+- مرورگر: سوال بی‌پاسخ پس از انتخاب هیچ کلاس wrong نگرفت و پیام هشدار
+  نمایش داده شد؛ زیرمبحث خالی دکمهٔ «نمایش ۲۱۳ سوال نفرولوژی» داد و آن
+  فیلتر ۲۱۳ سوال را نشان داد؛ دکمهٔ split برای نفرولوژی «۱۰ زیرمبحث» را
+  دید؛ QR به‌روزرسانی `http://10.10.1.1:8765/medo.apk` را ساخت و سرور
+  همان فایل را با 200/۲۸۳KB برگرداند.
+
+# ۲۶ اکتبر — دور دوم: شبکه، QR و شمارش زیرمبحث‌ها
+
+## ۱) چرا اسکن/دانلود قبلی شکست می‌خورد (ریشهٔ واقعی)
+- `medo/netfix.py` هر وقت DNS جعلی (۱۹۸.۱۸.x) می‌داد، IP واقعی را با
+  `--host-resolver-rules` پین می‌کرد. روی شبکهٔ فعلی (VPN/تونل خودش ترافیک
+  آدرس جعلی را می‌برد) همین پین‌کردن اتصال را می‌شکست و همهٔ دانلودها
+  «SSL connect error» می‌دادند.
+- حالا `reachable()` هر دو مسیر را با یک handshake کوتاه تست می‌کند و فقط
+  اگر آدرس واقعی جواب بدهد و مسیر سیستمی ندهد پین می‌کند. نتیجه روی این
+  شبکه: بدون پین، medofast.ir مستقیم ۲۰۰ می‌دهد.
+
+## ۲) زیرمبحث‌ها
+- ۲۴۳۵ زیرمبحث در درخت هست ولی همهٔ ۳۲۲ سوال بدون `tag_id` ذخیره شده‌اند
+  (بانک از صفحهٔ بی‌فیلتر مبحث دانلود شده). تنها راه تقسیم، خود سایت است.
+- `scripts/backfill_tags.py` برای همین نوشته شد و کار می‌کند (تست آزمایشی
+  با `--max-pages 2`: ۱۹ سوال نگاشت شد)، اما سایت بعد از ~۵۰ درخواست
+  ۴۲۹/HTML برگرداند؛ حالا اسکریپت روی throttle عقب‌نشینی می‌کند و کل اجرا
+  را می‌ایستد تا با `--delay 1.5` بعداً کامل شود.
+- سمت اپ: نشان هر مبحث دیگر سوال‌های زیرمبحث خودش را دوباره نمی‌شمارد
+  (`Bank.count` مثل وب)؛ زیرمبحث خالی هم پیام + «نمایش N سوال والد» می‌دهد.
+
+## ۳) QR و آدرس پیشنهادی
+- `share.lan_addresses()` مرتب شد: 192.168/16 → 10/8 → بقیه → Docker/WSL
+  (۱۷۲.۱۶/۱۲)، CGNAT/VPN (۱۰۰/۱۰) و link-local آخر. روی این دستگاه دیگر
+  `172.18.0.1` پیشنهاد نمی‌شود بلکه `10.67.195.246`.
+
+## ۴) تأییدها (این دور)
+- `pytest -q` → **۲۱۶ passed**؛ `android/test.sh` → **۱۱۰ checks**.
+- `bash android/build.sh` → `dist/medo.apk` ۲۷۶KB (۱۹:۰۳) شامل ScanActivity،
+  SharedFileProvider و zxing؛ `build-bank` و `build-web` هم تازه شدند.
+- مرورگر (سرور ۸۰۹۹): سوال بدون پاسخ انتخاب شد → هیچ کلاس wrong نگرفت و
+  پیام «غلط شمرده نمی‌شود» آمد؛ زیرمبحث خالی «نمایش ۲۱۳ سوال نفرولوژی» داد و
+  آن فیلتر ۲۱۳ سوال را نشان داد؛ QR انتقال و «QR نصب/به‌روزرسانی» هر دو
+  ساخته شدند (SVG محلی) و APK ۲۷۶KB توسط سرور سرو می‌شود.
+- تأیید نشده (محدودیت محیط): xoروجی PDF و اسکنر QR روی خود اندروید اجرا
+  نشده؛ فقط کامپایل، منطق JVM و بازبینی کد. باید روی گوشی تست شود.
+
+## ۵) «اینترنت قطع است» و توقف دانلود (۲۶ اکتبر، بعدازظهر)
+- تشخیص: در رجیستری ویندوز `ProxyEnable=1` و
+  `ProxyServer=127.0.0.1:10808` است ولی هیچ‌چیز روی آن پورت گوش نمی‌دهد
+  (برنامهٔ VPN/پروکسی خاموش است). کروم/کرومیوم از همین تنظیم پیروی می‌کند،
+  پس هر صفحه با `ERR_PROXY_CONNECTION_FAILED` می‌افتد، سایت پیام خودش
+  («اینترنت قطع است») را نشان می‌دهد و دانلود هم متوقف می‌شود.
+  با آزمایش چهار حالت (بدون پروکسی، ۱۰۸۰۸، ۱۰۸۰۹، ۱۰۸۰) هیچ‌کدام باز
+  نشد؛ یعنی مسیر شبکه الان از سمت ویندوز بسته است، نه از سمت کد.
+- کار لازم کاربر: روشن‌کردن VPN/پروکسی، یا خاموش‌کردن
+  Settings → Network → Proxy → «Use a proxy server».
+- کد: `netfix.proxy_problem()` این حالت را با یک connect کوتاه تشخیص
+  می‌دهد، پیام فارسی روشن می‌دهد، در `launcher.log` ثبت می‌کند و
+  `browser.launch_browser` در آن حالت `--no-proxy-server` می‌گذارد تا
+  به‌جای خطای پروکسی، مسیر مستقیم امتحان شود. `pytest -q` → **۲۱۷ passed**.
+- `test_share_refuses_writes` هم مقاوم شد: سرور ۵۰۱ می‌دهد و اتصال را
+  می‌بندد، پس گاهی ConnectionReset می‌آید؛ حالا هر دو پذیرفته می‌شود.
+
+## ۶) کوچک‌کردن دانلود، ترتیب دسته‌ها، پاسخ‌های جاافتاده و پاسخ‌نامهٔ فصلی (۲۷ اکتبر)
+- **نوار دانلود کوچک‌شده:** دکمهٔ «–» در سرصفحهٔ پنجرهٔ دانلود + نوار شناور گوشهٔ
+  صفحه با همان آمار، دکمهٔ توقف، «ادامه در پس‌زمینه» و «جزئیات». بستن پنجره
+  هنگام اجرا دیگر دانلود را نامرئی نمی‌کند؛ پس از پایان نوار خودش کنار می‌رود.
+  در بارگذاری مجدد، اجرای در جریان از سرور خوانده و نوار نمایش داده می‌شود.
+- **ترتیب ریشه‌ها:** `db.root_rank()` → دستیاری، پره انترنی، تالیفی، بقیه.
+  `get_category_tree` همین ترتیب را می‌دهد، پس هم وب و هم `dist/medo.medo`
+  (گوشی) به‌روز شدند.
+- **بازیابی پاسخ‌های جاافتاده:** `medo/answer_audit.py` فقط ردیف‌های
+  `correct_index IS NULL` را با نشست ذخیره‌شده دوباره می‌خواند، سوال را با
+  امضای گزینه‌ها تطبیق می‌دهد، «نمایش جواب» را می‌زند و پاسخ را ذخیره می‌کند.
+  اگر صفحه پیدا نشود یا سایت پاسخی ندهد، چیزی حدس زده نمی‌شود. دو خطای پیاپی
+  بارگذاری، اجرا را با پیام روشن متوقف می‌کند (اینترنت/پروکسی).
+- **پخش زیرمبحث‌ها:** دکمهٔ `POST /api/tags/sync` همان `scripts/backfill_tags.py`
+  را با نشست ذخیره‌شده اجرا می‌کند (قبلاً بدون نشست اجرا می‌شد) و در پایان
+  بانک وب و گوشی را باز می‌سازد. «سلامت بانک» از `GET /api/bank/health`:
+  ۴۲۴ سوال، ۷۴ بدون پاسخ، ۴۲۳ بدون زیرمبحث.
+- **پاسخ‌نامهٔ PDF:** کلید و پاسخ تشریحی هر بخش بلافاصله بعد از سوالات همان بخش
+  (با شکست صفحه) چاپ می‌شود، نه یک بلوک در آخر کتاب؛ شماره‌ها همان شمارهٔ چاپی
+  کتاب‌اند. `dist/medo_test_book.pdf` بازسازی شد (۲.۹ مگابایت).
+- **پرو:** بررسی وب نشان داد «مدوفست پرو» اشتراکی با پاسخ‌نامهٔ تشریحی است؛
+  هیچ شاهد فنی برای «نسخهٔ جدا» یا کد مخفی پیدا نشد و صفحه‌های سایت از شبکهٔ
+  پژوهشگر در دسترس نبودند. بنابراین ابزار بازیابی با حساب خود کاربر کار می‌کند
+  و اگر سایت پاسخی نشان ندهد، همان را گزارش می‌کند.
+- **تأیید:** `pytest -q` → **۲۲۲ passed**، سپس تست‌های هدفمند پس از آخرین
+  تغییرات → **۶۱ passed**؛ `node --check app.js` پاک؛ `/api/bank/health` و
+  نوار کوچک‌شده در مرورگر واقعی (۸۰۹۹) بررسی شدند. اسکن/بازیابی روی سایت
+  واقعی اجرا نشد چون شبکهٔ این دستگاه به مدوفست نمی‌رسد.
+
+## ۷) رفع ایرادهای گزارش‌شده: سلامت بانک، زیرمبحث‌ها، QR و پاسخ‌نامهٔ گوشی (۲۷ اکتبر)
+- **چرا «سلامت بانک» کار نمی‌کرد:** لاگ (۱۷:۰۰:۳۶) نشان داد `audit_answers` با
+  `ImportError: cannot import name 'PlaywrightError' from 'playwright.sync_api'`
+  می‌مرد — این نسخهٔ Playwright نام را `Error` صادر می‌کند. ایمپورت به بالای
+  ماژول منتقل و اصلاح شد، پس تست رگرسیون هم می‌تواند بگیرد.
+- **چرا سوال‌ها در زیرمبحث‌ها پخش نمی‌شدند:** لاگ نشان داد هر صفحهٔ فیلترشده
+  `HTTP 429` می‌گیرد (`tag 4: page 11`, `tag 2574: page 43` و بعد از آن همهٔ
+  تگ‌ها). اسکریپت با تأخیر ۰٫۱۲ ثانیه پشت سر هم درخواست می‌داد، بعد از محدودشدن
+  هم تگ بعدی را می‌زد و کل اجرا بدون هیچ نگاشتی تمام می‌شد. حالا:
+  `--delay 1.2`، احترام به `Retry-After`، عقب‌نشینی نمایی، و وقتی سایت همچنان
+  محدود می‌کند اجرا **متوقف** می‌شود نه اینکه باقی تگ‌ها را بسوزاند. اجرای
+  بعدی زیرمبحث‌های کامل‌شده را رد می‌کند (`tagged_count`) و از همان‌جا ادامه
+  می‌دهد؛ در پایان تعداد سوال‌های بی‌زیرمبحث هر مبحث چاپ می‌شود.
+- **پاسخ‌نامهٔ PDF گوشی:** `PdfExporter.answerKey()` — صفحهٔ «پاسخنامه» در پایان
+  فایل، شمارهٔ سوال → گزینهٔ درست، ستون‌بندی راست‌به‌چپ؛ «—» یعنی پاسخ ثبت نشده.
+  رنگ‌شدن گزینهٔ درست کنار خود سوال سر جایش ماند.
+- **چرا اسکن QR روی گوشی هیچ نمی‌کرد:** `Camera.setPreviewCallback` همیشه
+  **همان آرایه** را برای هر فریم می‌دهد؛ دیکود ناهمگام همان بافر را می‌خواند که
+  دوربین در حال رونویسی‌اش بود، پس عملاً هیچ فریمی سالم دیکود نمی‌شد. حالا فریم
+  کپی می‌شود (`data.clone()`). به‌علاوه منطق دیکود به `QrDecoder` منتقل شد
+  (خالص zxing، قابل تست روی JVM): چهار جهت، `ALSO_INVERTED` برای کد روی پس‌زمینهٔ
+  تیره، و افت‌به‌پایین به `GlobalHistogramBinarizer`. QR دسکتاپ هم بزرگ‌تر شد
+  (۱۸۴px، ناحیهٔ سکوت ۴ ماژول: `createSvgTag({cellSize:4, margin:16, scalable:true})`)؛
+  بعد از ~۸ ثانیه بی‌نتیجه، راهنمای اسکنر عوض می‌شود.
+- **تأیید:** `pytest -q` → **۲۲۶ passed**؛ `android/test.sh` → **ALL PASSED (114
+  checks)** با تست جدید QR (عادی، وارونه، سفید، بافر کوتاه)؛ `android/build.sh`
+  → `dist/medo.apk` (۲۷۶KB)؛ `node --check app.js` پاک؛ SVG در node بررسی شد.
+  اجرای واقعی نگاشت زیرمبحث‌ها و بازیابی پاسخ روی سایت انجام نشد چون شبکهٔ این
+  دستگاه به مدوفست نمی‌رسد (ERR_CONNECTION_RESET) — روی گوشی هم نیاز به نصب
+  APK تازه و انتقال `dist/medo.medo` جدید دارد.
+
+## ریشهٔ «هیچ سوالی ذخیره نشد»: محدودسازی ۴۲۹ سایت، نه اینترنت
+
+- **شاهد از لاگ (`logs/medo.log`، ۱۷:۴۳–۱۷:۴۵):** برای هر ۱۳ زیرمبحث مبحث ۷۸
+  `status=paused saved=0 detail=could not position at page 1` و در همان اجرا
+  `stopped at page 1/? — page 1: HTTP 429`. یعنی سایت درخواست‌ها را محدود کرده
+  بود؛ تا امروز این حالت و «شبکه قطع است» یک پیام می‌گرفتند.
+- **تشخیص درست:** `scraper.document_status()` بعد از هر صفحهٔ ناموفق کد HTTP را
+  می‌پرسد؛ ۴۲۹ ⇒ وضعیت تازهٔ `throttled` («۱۵ تا ۳۰ دقیقه صبر کن»). خط
+  `[diag] … http=… url=… body=…` در لاگ می‌ماند تا دلیل واقعی هر شکست معلوم شود.
+- **اسکن زیرمبحث‌ها:** سرصفحهٔ «مبحث ۴ از ۱۳ — «سیروز کبدی» · تا اینجا ۵۲ سوال»
+  و بعد از هر کدام «↳ … ۱۲ سوال ذخیره شد»؛ زیرمبحثِ completed که سوال دارد
+  دوباره دانلود نمی‌شود (`_target_progress`).
+- **بازیابی پاسخ‌ها:** همان ۴۲۹ حالا پیام درست می‌دهد؛ تا لحظهٔ توقف هر پاسخی
+  که پیدا شد ذخیره است.
+- **PDF گوشی:** پاسخ‌نامه از «یک صفحه در انتهای فایل» شد «پایان هر بخش» با
+  شمارهٔ پیوسته (`PdfExporter.sectionOf` + `answerKey(group, first, label)`).
+- **QR گوشی:** `QrDecoder.strideOf` بافر پاروپرشده (stride > width) را تشخیص
+  می‌دهد — روی رام‌هایی که هر ردیف پیش‌نمایش را گرد می‌کنند تصویر کج می‌شد و
+  هیچ کدی خوانده نمی‌شد. راهنمای اسکنر بعد از ~۲۰ ثانیه اندازهٔ فریم را می‌گوید.
+  `AndroidManifest.xml` → `versionName 1.2` تا نصب‌شدن نسخهٔ تازه قابل بررسی باشد.
+- **تأیید:** `pytest -q` → ۲۲۶ passed؛ `android/test.sh` → ALL PASSED (۱۱۶ چک،
+  شامل stride پاروپرشده)؛ `android/build.sh` → `dist/medo.apk` (v1.2) و
+  `grep -a` روی dex وجود «پاسخ‌نامهٔ هر بخش» و `strideOf` را ثابت کرد.
+- **ناتمام:** شبکهٔ این دستگاه به medofast.ir نمی‌رسد (curl → 000 در ۱۰ ثانیه)،
+  پس نه دانلود واقعی و نه نگاشت زیرمبحث‌ها روی سایت تست نشد.
