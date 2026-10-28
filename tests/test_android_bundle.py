@@ -28,6 +28,7 @@ from medo.share import (
     FORMAT_NAME,
     FORMAT_VERSION,
     build_android_bundle,
+    read_bundle,
     bundle_bytes,
     lan_addresses,
     start_share,
@@ -140,10 +141,18 @@ def test_completed_node_is_not_marked_partial(seeded_db):
 
 
 def test_persian_text_is_not_escaped_and_bytes_are_utf8(seeded_db):
+    import zipfile
+
     blob = bundle_bytes(seeded_db)
-    assert "بیمار".encode("utf-8") in blob
-    assert b"\\u0628" not in blob            # no \u0628 escape sequences
-    assert json.loads(blob.decode("utf-8"))["stats"]["total"] == 2
+    assert blob[:2] == b"PK"                  # v2 is a zip
+    with zipfile.ZipFile(__import__("io").BytesIO(blob)) as zf:
+        names = zf.namelist()
+        assert "index.json" in names
+        assert any(name.startswith("chunks/") for name in names)
+        chunk = zf.read([n for n in names if n.startswith("chunks/")][0])
+    assert "بیمار".encode("utf-8") in chunk
+    assert b"\\u0628" not in chunk            # no \u0628 escape sequences
+    assert read_bundle(blob)["stats"]["total"] == 2
 
 
 def test_empty_archive_still_produces_a_valid_bundle(tmp_path):
@@ -153,7 +162,32 @@ def test_empty_archive_still_produces_a_valid_bundle(tmp_path):
     conn.close()
     b = build_android_bundle(db_path)
     assert b["questions"] == [] and b["stats"]["total"] == 0
-    assert json.loads(bundle_bytes(db_path).decode("utf-8"))["tree"] == []
+    assert read_bundle(bundle_bytes(db_path))["tree"] == []
+
+
+def test_index_is_light_and_chunks_hold_the_bodies(seeded_db):
+    """The phone counts and lists from the index without loading every lesson."""
+    import io
+    import zipfile
+
+    blob = bundle_bytes(seeded_db)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        index = json.loads(zf.read("index.json").decode("utf-8"))
+        chunk = json.loads(zf.read(index["chunks"][0]["file"]).decode("utf-8"))
+    assert index["chunks"], "a bank with questions must declare its chunks"
+    assert index["chunks"][0]["count"] == 2
+    entry = index["questions"][0]
+    assert "explanation_html" not in entry and "options" not in entry
+    assert entry["chunk"] == index["chunks"][0]["id"]
+    assert chunk["questions"][0]["explanation_html"]
+
+
+def test_a_category_selection_ships_only_that_branch(seeded_db):
+    bundle = read_bundle(bundle_bytes(seeded_db, categories=[79]))
+    assert bundle["stats"]["total"] == 2
+    bundle_none = read_bundle(bundle_bytes(seeded_db, categories=[12345]))
+    assert bundle_none["stats"]["total"] == 0
+    assert bundle_none["tree"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +198,10 @@ def test_write_bundle_creates_parents_and_overwrites(tmp_path, seeded_db):
     out = tmp_path / "nested" / "dir" / "bank.medo"
     written = write_bundle(out, db_path=seeded_db)
     assert written == out and out.is_file()
-    assert json.loads(out.read_text(encoding="utf-8"))["format"] == FORMAT_NAME
+    assert read_bundle(out.read_bytes())["format"] == FORMAT_NAME
 
     write_bundle(out, db_path=seeded_db)
-    assert json.loads(out.read_text(encoding="utf-8"))["stats"]["total"] == 2
+    assert read_bundle(out.read_bytes())["stats"]["total"] == 2
     assert not list(out.parent.glob("*.tmp"))     # temp file replaced, not left
 
 
@@ -195,9 +229,9 @@ def _get(port: int, path: str):
 def test_share_serves_the_download(share_server):
     status, headers, body = _get(share_server, f"/{BUNDLE_FILENAME}")
     assert status == 200
-    assert headers["Content-Type"].startswith("application/json")
+    assert headers["Content-Type"].startswith("application/zip")
     assert BUNDLE_FILENAME in headers["Content-Disposition"]
-    assert json.loads(body.decode("utf-8"))["stats"]["total"] == 2
+    assert read_bundle(body)["stats"]["total"] == 2
 
 
 def test_share_index_explains_the_import(share_server):

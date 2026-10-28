@@ -260,16 +260,25 @@ app.command(name="export-web")(export_web_cmd)
 def export_android_cmd(
     output: Path = typer.Option(DIST_DIR / "medo.medo", "--output", "-o", help="Output .medo file"),
     db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+    category: Optional[list[int]] = typer.Option(
+        None, "--category", "-c",
+        help="Only these categories/topics (repeatable; default = whole bank)"),
+    images: bool = typer.Option(
+        False, "--images/--no-images",
+        help="Embed small WebP mind-maps in the lessons (much larger file)"),
 ):
     """
     Package the archive for the Android app (USB copy or system file picker).
     """
     from medo.share import write_bundle
 
-    out = write_bundle(output, db_path=db_path)
+    out = write_bundle(output, db_path=db_path, categories=category,
+                       include_images=images)
     size = out.stat().st_size / 1048576
     console.print(f"[bold green][+] Android bank written: {out} ({size:.1f} MB)[/bold green]")
     console.print("[dim]Copy it to the phone, then: home screen -> دریافت بانک -> انتخاب فایل[/dim]")
+    if not images:
+        console.print("[dim]بدون تصویر ساخته شد؛ برای درس‌نامه‌های تصویری: --images[/dim]")
 
 
 app.command(name="export-android")(export_android_cmd)

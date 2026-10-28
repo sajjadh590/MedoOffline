@@ -1,5 +1,9 @@
 package ir.medo.app;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -8,12 +12,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /** The whole offline archive: tree + questions, plus topic matching. */
 public final class Bank {
 
     public static final String FORMAT = "medo-bank";
-    public static final int SUPPORTED_VERSION = 1;
+    /** v2 = zip(index.json + chunks/<category>.json); v1 = one JSON file. */
+    public static final int SUPPORTED_VERSION = 2;
 
     public final int version;
     public final String generatedAt;
@@ -24,6 +31,9 @@ public final class Bank {
     public final List<Question> questions = new ArrayList<>();
 
     private final Map<Integer, Question> byId = new HashMap<>();
+    private final Map<Integer, Integer> positions = new HashMap<>();
+    private final List<Map<String, Object>> chunkFiles = new ArrayList<>();
+    private Map<String, List<Integer>> wordIndex;
     private final Map<String, Node> byUrl = new HashMap<>();
     private final Map<Integer, Integer> perTopic = new HashMap<>();
     private final Map<Long, Integer> perTag = new HashMap<>();
@@ -50,8 +60,12 @@ public final class Bank {
             roots.add(Node.from(MiniJson.asMap(raw), 0));
         }
         index(roots);
+        for (Object raw : MiniJson.asList(root.get("chunks"))) {
+            chunkFiles.add(MiniJson.asMap(raw));
+        }
         for (Object raw : MiniJson.asList(root.get("questions"))) {
             Question q = Question.from(MiniJson.asMap(raw));
+            positions.put(q.id, questions.size());
             questions.add(q);
             byId.put(q.id, q);
             // A question can sit in several subtopics of the same topic; it
@@ -81,6 +95,84 @@ public final class Bank {
         return new Bank(MiniJson.asMap(MiniJson.parse(json)));
     }
 
+    /** Read either format: the v2 zip, or the old single JSON document. */
+    public static Bank load(File file) throws Exception {
+        if (isZip(file)) {
+            return parseZip(file);
+        }
+        return parse(Io.readText(file));
+    }
+
+    public static boolean isZip(File file) throws Exception {
+        FileInputStream in = new FileInputStream(file);
+        try {
+            return in.read() == 'P' && in.read() == 'K';
+        } finally {
+            in.close();
+        }
+    }
+
+    /**
+     * Zip bundle: the index first (tree, counts, light entries), then each
+     * chunk straight from the archive and into questions — one chunk in memory
+     * at a time instead of the whole file as bytes, as a String and as a tree.
+     */
+    public static Bank parseZip(File file) throws Exception {
+        ZipFile zip = new ZipFile(file);
+        try {
+            ZipEntry indexEntry = zip.getEntry("index.json");
+            if (indexEntry == null) {
+                throw new IllegalArgumentException("فایل بانک ناقص است (index.json ندارد)");
+            }
+            Map<String, Object> index = MiniJson.asMap(
+                    MiniJson.parse(readEntry(zip, indexEntry)));
+            Bank bank = new Bank(index);
+            for (Map<String, Object> chunk : bank.chunkFiles) {
+                String path = MiniJson.str(chunk, "file", "");
+                ZipEntry entry = path.isEmpty() ? null : zip.getEntry(path);
+                if (entry == null) {
+                    continue;          // a missing chunk loses only that category
+                }
+                Map<String, Object> body = MiniJson.asMap(
+                        MiniJson.parse(readEntry(zip, entry)));
+                bank.absorb(MiniJson.asList(body.get("questions")));
+            }
+            return bank;
+        } finally {
+            zip.close();
+        }
+    }
+
+    /** Full chunk rows replace the light index entries for the same ids. */
+    private void absorb(List<Object> rawQuestions) {
+        for (Object raw : rawQuestions) {
+            Question q = Question.from(MiniJson.asMap(raw));
+            Integer at = positions.get(q.id);
+            if (at == null) {
+                positions.put(q.id, questions.size());
+                questions.add(q);
+            } else {
+                questions.set(at, q);
+            }
+            byId.put(q.id, q);
+        }
+    }
+
+    private static String readEntry(ZipFile zip, ZipEntry entry) throws Exception {
+        InputStream in = zip.getInputStream(entry);
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+            return new String(out.toByteArray(), "UTF-8");
+        } finally {
+            in.close();
+        }
+    }
+
     private void index(List<Node> nodes) {
         for (Node n : nodes) {
             if (n.sourceUrl != null && !n.sourceUrl.isEmpty()) {
@@ -102,6 +194,64 @@ public final class Bank {
 
     public Question question(int id) {
         return byId.get(id);
+    }
+
+    /** Word -> ids, built once on the first search and kept for the session. */
+    private void ensureWordIndex() {
+        if (wordIndex != null) {
+            return;
+        }
+        Map<String, List<Integer>> index = new HashMap<>();
+        for (Question q : questions) {
+            StringBuilder text = new StringBuilder(q.stemText)
+                    .append(' ').append(q.path);
+            for (Question.Option o : q.options) {
+                text.append(' ').append(o.text);
+            }
+            for (String word : Text.normalizeSearch(text.toString())
+                    .split("[^\\p{L}\\p{N}]+")) {
+                if (word.length() < 2) {
+                    continue;
+                }
+                List<Integer> ids = index.get(word);
+                if (ids == null) {
+                    ids = new ArrayList<>();
+                    index.put(word, ids);
+                }
+                if (ids.isEmpty() || ids.get(ids.size() - 1) != q.id) {
+                    ids.add(q.id);
+                }
+            }
+        }
+        wordIndex = index;
+    }
+
+    /** Every question whose stem/options contain ALL the words of the query. */
+    public Set<Integer> searchIds(String query) {
+        String needle = Text.normalizeSearch(query);
+        if (needle.isEmpty()) {
+            return new HashSet<>(byId.keySet());
+        }
+        ensureWordIndex();
+        Set<Integer> current = null;
+        for (String word : needle.split("[^\\p{L}\\p{N}]+")) {
+            if (word.isEmpty()) {
+                continue;
+            }
+            List<Integer> ids = wordIndex.get(word);
+            if (ids == null) {
+                return new HashSet<>();
+            }
+            if (current == null) {
+                current = new HashSet<>(ids);
+            } else {
+                current.retainAll(new HashSet<>(ids));
+            }
+            if (current.isEmpty()) {
+                return current;
+            }
+        }
+        return current == null ? new HashSet<>(byId.keySet()) : current;
     }
 
     public Node node(String sourceUrl) {

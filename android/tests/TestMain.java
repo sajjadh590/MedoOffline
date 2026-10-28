@@ -8,12 +8,15 @@ import com.google.zxing.common.BitMatrix;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Logic tests for the Android app, run on the desktop JVM.
@@ -42,6 +45,7 @@ public final class TestMain {
         scanTargets();
         qrDecoding();
         subtopicsAndAnswers();
+        zipBundle();
         realBundle(new File(bundlePath));
 
         System.out.println();
@@ -512,19 +516,67 @@ public final class TestMain {
 
     // -------------------------------------------------------------- real bundle
 
+    /** The v2 zip: index first, body from the chunk, both under one id. */
+    private static void zipBundle() {
+        File file = null;
+        try {
+            file = File.createTempFile("medo-test", ".medo");
+            String index = "{\"format\":\"medo-bank\",\"version\":2,"
+                    + "\"stats\":{\"total\":1},\"tree\":[],"
+                    + "\"questions\":[{\"id\":7,\"topic_id\":5,\"tag_id\":0,"
+                    + "\"nodes\":[{\"topic_id\":5,\"tag_id\":0}],"
+                    + "\"stem_text\":\"بیمار با تب\",\"correct\":2}],"
+                    + "\"chunks\":[{\"id\":5,\"count\":1,\"file\":\"chunks/5.json\"}]}";
+            String chunk = "{\"format\":\"medo-bank\",\"version\":2,\"chunk\":5,"
+                    + "\"questions\":[{\"id\":7,\"topic_id\":5,\"tag_id\":0,"
+                    + "\"nodes\":[{\"topic_id\":5,\"tag_id\":0}],"
+                    + "\"stem_html\":\"<p>بیمار</p>\",\"stem_text\":\"بیمار با تب\","
+                    + "\"options\":[{\"index\":1,\"text\":\"الف\"},{\"index\":2,\"text\":\"ب\"}],"
+                    + "\"correct\":2,\"explanation_html\":\"<p>درس</p>\","
+                    + "\"explanation_text\":\"درس\",\"explanation_status\":\"full\"}]}";
+
+            ZipOutputStream out = new ZipOutputStream(new FileOutputStream(file));
+            try {
+                out.putNextEntry(new ZipEntry("index.json"));
+                out.write(index.getBytes("UTF-8"));
+                out.closeEntry();
+                out.putNextEntry(new ZipEntry("chunks/5.json"));
+                out.write(chunk.getBytes("UTF-8"));
+                out.closeEntry();
+            } finally {
+                out.close();
+            }
+
+            Bank bank = Bank.load(file);
+            eq("zip: one question", 1, bank.size());
+            Question q = bank.question(7);
+            check("zip: options come from the chunk", q != null && q.options.size() == 2);
+            check("zip: lesson comes from the chunk", q != null && q.hasExplanation());
+            check("zip: word search", q != null && bank.searchIds("بیمار").contains(7));
+            check("zip: empty search lists all", bank.searchIds("").contains(7));
+        } catch (Exception e) {
+            check("zip bundle threw " + e, false);
+        } finally {
+            if (file != null) {
+                file.delete();
+            }
+        }
+    }
+
     private static void realBundle(File file) {
         if (!file.isFile()) {
             check("bundle exists at " + file, false);
             return;
         }
         try {
-            String text = new String(readAll(file), "UTF-8");
             long started = System.currentTimeMillis();
-            Bank bank = Bank.parse(text);
+            // Bank.load sniffs the format: v2 zip or the old single JSON.
+            Bank bank = Bank.load(file);
             long parseMs = System.currentTimeMillis() - started;
 
             check("bundle parsed", bank.size() > 0);
-            eq("format version", 1, bank.version);
+            check("format version is 1 or 2 (got " + bank.version + ")",
+                    bank.version == 1 || bank.version == 2);
             check("tree not empty", !bank.roots.isEmpty());
             check("parse under 3s (" + parseMs + "ms)", parseMs < 3000);
             System.out.println("     parsed " + bank.size() + " questions in " + parseMs + " ms");
@@ -533,6 +585,14 @@ public final class TestMain {
             check("question has options", first.options.size() >= 2);
             check("persian stem survives", first.stemText.length() > 0);
             check("question reachable by id", bank.question(first.id) == first);
+            String[] words = Text.normalizeSearch(first.stemText)
+                    .split("[^\\p{L}\\p{N}]+");
+            if (words.length > 0 && words[0].length() > 1) {
+                check("word search finds the first question",
+                        bank.searchIds(words[0]).contains(first.id));
+            }
+            eq("empty search lists the whole bank", bank.size(),
+                    bank.searchIds("").size());
 
             Node leaf = findLeafWithQuestions(bank);
             check("found a topic with questions", leaf != null);

@@ -4,9 +4,11 @@ Hand the archive to the Android app — offline, no accounts, no cloud.
 
 Two routes, same payload:
 
-* ``write_bundle()`` produces a ``.medo`` file (plain JSON, UTF-8) that the
-  phone imports through the system file picker (copy with a USB cable, or
-  ``adb push``).
+* ``write_bundle()`` produces a ``.medo`` file — a ZIP holding ``index.json``
+  (tree + one light entry per question) and one JSON chunk per top-level
+  category — that the phone imports through the system file picker (copy with
+  a USB cable, or ``adb push``).  The old single-JSON file is still read by
+  the app, so an already-installed bank keeps working.
 * ``start_share()`` runs a tiny **read-only** HTTP server on the LAN so the
   app's «دریافت از وای‌فای» imports the same payload; over USB,
   ``adb reverse tcp:8765 tcp:8765`` makes it reachable at 127.0.0.1.
@@ -17,8 +19,12 @@ answers GET for three paths and never writes anything.
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
+import re
 import socket
+import zipfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,10 +38,13 @@ from medo.db import (
     get_category_tree,
     get_connection,
 )
-from medo.paths import DIST_DIR
+from medo.paths import DEFAULT_ASSETS_DIR, DIST_DIR
 
 FORMAT_NAME = "medo-bank"
-FORMAT_VERSION = 1
+# v2 = zip (index + per-category chunks); v1 = one JSON document.
+FORMAT_VERSION = 2
+INDEX_NAME = "index.json"
+CHUNK_DIR = "chunks"
 BUNDLE_FILENAME = "medo.medo"
 DEFAULT_SHARE_PORT = 8765
 
@@ -120,8 +129,96 @@ def _decorate(nodes: list[dict], progress: dict) -> list[dict]:
     return nodes
 
 
-def build_android_bundle(db_path: Path | str = DEFAULT_DB_PATH) -> dict:
-    """The whole archive as one JSON-able dict (stable key order, no NaN)."""
+def _topic_id(source_url: str) -> int:
+    """\"/qbank/topic-id-79?tag=3\" -> 79 (0 for a non-topic node)."""
+    m = re.search(r"topic-id-(\d+)", source_url or "")
+    return int(m.group(1)) if m else 0
+
+
+def _topic_roots(tree: list[dict]) -> dict[int, int]:
+    """topic id -> id of the top-level category it is filed under."""
+    roots: dict[int, int] = {}
+
+    def walk(nodes: list[dict], root_id: int) -> None:
+        for n in nodes:
+            rid = root_id or int(n.get("id") or 0)
+            tid = _topic_id(n.get("source_url") or "")
+            if tid:
+                roots.setdefault(tid, rid)
+            walk(n.get("children") or [], rid)
+
+    walk(tree, 0)
+    return roots
+
+
+def _titles_by_root(tree: list[dict]) -> dict[int, str]:
+    return {int(n.get("id") or 0): str(n.get("title") or "") for n in tree}
+
+
+def _selected_topics(tree: list[dict], wanted: set[int]) -> set[int]:
+    """Resolve category ids, category node ids and topic ids to topic ids."""
+    chosen: set[int] = set()
+
+    def walk(nodes: list[dict], inside: bool) -> None:
+        for n in nodes:
+            tid = _topic_id(n.get("source_url") or "")
+            hit = inside or int(n.get("id") or 0) in wanted or tid in wanted
+            if tid and hit:
+                chosen.add(tid)
+            walk(n.get("children") or [], hit)
+
+    walk(tree, False)
+    return chosen
+
+
+def _prune_tree(nodes: list[dict], topics: set[int]) -> list[dict]:
+    """The tree with the branches that hold none of `topics` removed."""
+    kept: list[dict] = []
+    for n in nodes:
+        children = _prune_tree(n.get("children") or [], topics)
+        tid = _topic_id(n.get("source_url") or "")
+        if children or (tid and tid in topics):
+            clone = dict(n)
+            clone["children"] = children
+            kept.append(clone)
+    return kept
+
+
+def _inline_images(html: str, assets_dir: Path, max_width: int = 900) -> str:
+    """Turn ``src="assets/x.webp"`` into a small WebP data URI for the phone.
+
+    The phone has no assets folder next to its bank file, so an image that the
+    web archive shows inline would render broken there.  Opt-in, because a
+    mind-map per lesson is most of the bundle's size.
+    """
+    from medo.assets import optimize_image
+
+    def repl(match: re.Match) -> str:
+        path = assets_dir / match.group(1)
+        if not path.is_file():
+            return match.group(0)
+        try:
+            data, _ext, mime = optimize_image(path.read_bytes(), role="mindmap",
+                                               max_width=max_width)
+        except Exception:
+            return match.group(0)
+        return 'src="data:%s;base64,%s"' % (
+            mime, base64.b64encode(data).decode("ascii"))
+
+    return re.sub(r'src="assets/([^"]+)"', repl, html or "")
+
+
+def build_android_bundle(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    categories: Optional[list[int]] = None,
+    include_images: bool = False,
+    assets_dir: Path | str = DEFAULT_ASSETS_DIR,
+) -> dict:
+    """The archive as one JSON-able dict (stable key order, no NaN).
+
+    ``categories`` keeps only the topics under the given category/topic ids;
+    ``include_images`` embeds small WebP mind-maps into the lesson HTML.
+    """
     conn = get_connection(db_path)
     try:
         rows = get_all_questions(conn)
@@ -129,7 +226,22 @@ def build_android_bundle(db_path: Path | str = DEFAULT_DB_PATH) -> dict:
     finally:
         conn.close()
 
+    tree = [_clean_node(n) for n in tree]
+    if categories:
+        wanted = {int(c) for c in categories if int(c) > 0}
+        topics = _selected_topics(tree, wanted)
+        rows = [r for r in rows
+                if any(int(n.get("topic_id") or 0) in topics
+                       for n in (r.get("nodes") or []))]
+        tree = _prune_tree(tree, topics)
+
     questions = [_clean_question(r) for r in rows]
+    if include_images:
+        assets = Path(assets_dir)
+        for q in questions:
+            q["stem_html"] = _inline_images(q["stem_html"], assets)
+            q["explanation_html"] = _inline_images(q["explanation_html"], assets)
+
     answered = sum(1 for q in questions if q["correct"] not in (None, 0))
     stats = {
         "total": len(questions),
@@ -139,32 +251,99 @@ def build_android_bundle(db_path: Path | str = DEFAULT_DB_PATH) -> dict:
         "missing_answer": len(questions) - answered,
         "with_explanation": sum(1 for q in questions if q["explanation_text"]),
         "bookmarked": sum(1 for q in questions if q["bookmarked"]),
+        "with_images": include_images,
     }
     return {
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "stats": stats,
-        "tree": [_clean_node(n) for n in tree],
+        "tree": tree,
         "questions": questions,
     }
 
 
-def bundle_bytes(db_path: Path | str = DEFAULT_DB_PATH) -> bytes:
-    """The exact bytes the app downloads — compact separators keep it small."""
-    payload = build_android_bundle(db_path)
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return text.encode("utf-8")
+# What the index keeps per question: enough to show a list, count the tree and
+# search, without the lesson HTML that makes a bundle heavy.
+_INDEX_FIELDS = (
+    "id", "topic_id", "tag_id", "nodes", "page", "ordinal", "stem_text",
+    "correct", "answer_source", "explanation_status", "has_images", "path",
+    "bookmarked", "selected",
+)
+
+
+def index_and_chunks(payload: dict) -> tuple[dict, dict[int, list[dict]]]:
+    """Split a full bundle into the zip's index.json and its chunk arrays."""
+    roots = _topic_roots(payload.get("tree") or [])
+    titles = _titles_by_root(payload.get("tree") or [])
+    chunks: dict[int, list[dict]] = {}
+    light: list[dict] = []
+    for q in payload.get("questions") or []:
+        cid = roots.get(int(q.get("topic_id") or 0), 0)
+        chunks.setdefault(cid, []).append(q)
+        entry = {k: q.get(k) for k in _INDEX_FIELDS}
+        entry["chunk"] = cid
+        light.append(entry)
+
+    index = {k: payload.get(k) for k in
+             ("format", "version", "generated_at", "stats", "tree")}
+    index["questions"] = light
+    index["chunks"] = [
+        {"id": cid, "title": titles.get(cid, ""), "count": len(qs),
+         "file": f"{CHUNK_DIR}/{cid}.json"}
+        for cid, qs in chunks.items()
+    ]
+    return index, chunks
+
+
+def bundle_bytes(
+    db_path: Path | str = DEFAULT_DB_PATH,
+    categories: Optional[list[int]] = None,
+    include_images: bool = False,
+) -> bytes:
+    """The exact bytes the app downloads: a zip of index + category chunks."""
+    payload = build_android_bundle(db_path, categories=categories,
+                                   include_images=include_images)
+    index, chunks = index_and_chunks(payload)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(INDEX_NAME, json.dumps(index, ensure_ascii=False,
+                                           separators=(",", ":")))
+        for cid, questions in chunks.items():
+            body = {"format": FORMAT_NAME, "version": FORMAT_VERSION,
+                    "chunk": cid, "questions": questions}
+            zf.writestr(f"{CHUNK_DIR}/{cid}.json",
+                        json.dumps(body, ensure_ascii=False,
+                                   separators=(",", ":")))
+    return buf.getvalue()
+
+
+def read_bundle(blob: bytes) -> dict:
+    """Undo :func:`bundle_bytes` (tests, inspection, a v1 JSON file)."""
+    if blob[:2] != b"PK":
+        return json.loads(blob.decode("utf-8"))
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        index = json.loads(zf.read(INDEX_NAME).decode("utf-8"))
+        questions: list[dict] = []
+        for chunk in index.get("chunks") or []:
+            part = json.loads(zf.read(chunk["file"]).decode("utf-8"))
+            questions.extend(part.get("questions") or [])
+    merged = dict(index)
+    merged["questions"] = questions
+    return merged
 
 
 def write_bundle(
     out_path: Path | str = DIST_DIR / BUNDLE_FILENAME,
     db_path: Path | str = DEFAULT_DB_PATH,
+    categories: Optional[list[int]] = None,
+    include_images: bool = False,
 ) -> Path:
     """Write ``out_path`` (.medo) atomically; returns the file path."""
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    blob = bundle_bytes(db_path)
+    blob = bundle_bytes(db_path, categories=categories,
+                        include_images=include_images)
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_bytes(blob)
     tmp.replace(out)
@@ -277,8 +456,12 @@ def _make_handler(
 ) -> type[BaseHTTPRequestHandler]:
     count = 0
     try:
-        count = json.loads(blob.decode("utf-8")).get("stats", {}).get("total", 0)
-    except (ValueError, UnicodeDecodeError):
+        if blob[:2] == b"PK":
+            with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+                count = json.loads(zf.read(INDEX_NAME))["stats"]["total"]
+        else:
+            count = json.loads(blob.decode("utf-8"))["stats"]["total"]
+    except (KeyError, ValueError, UnicodeDecodeError, zipfile.BadZipFile):
         pass
     apk_file = Path(apk_path) if apk_path else None
 
@@ -324,7 +507,9 @@ def _make_handler(
                 )
             elif path in (f"/{BUNDLE_FILENAME}", "/bank.json", "/medo.json"):
                 self._send(
-                    200, blob, "application/json; charset=utf-8",
+                    200, blob,
+                    ("application/zip" if blob[:2] == b"PK"
+                     else "application/json; charset=utf-8"),
                     {"Content-Disposition": f'attachment; filename="{BUNDLE_FILENAME}"'},
                 )
             elif path == "/health":

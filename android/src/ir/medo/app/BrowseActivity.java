@@ -22,8 +22,9 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
+import java.util.Set;
 
 /**
  * The question list for one topic (or the whole archive).
@@ -307,8 +308,12 @@ public final class BrowseActivity extends Activity {
 
     private void rebuild() {
         rows.clear();
+        // One word-index lookup per query, instead of re-folding every stem and
+        // option on every filter change.
+        Set<Integer> hits = (query.isEmpty() || bank == null)
+                ? null : bank.searchIds(query);
         for (Question q : base) {
-            if (matches(q)) {
+            if (matches(q, hits)) {
                 rows.add(q);
             }
         }
@@ -332,7 +337,7 @@ public final class BrowseActivity extends Activity {
         }
     }
 
-    private boolean matches(Question q) {
+    private boolean matches(Question q, Set<Integer> hits) {
         int picked = state.answer(q.id);
         if (filter == FILTER_UNANSWERED && picked > 0) {
             return false;
@@ -344,15 +349,7 @@ public final class BrowseActivity extends Activity {
                 && (picked == 0 || !q.hasAnswer() || picked == q.correct)) {
             return false;
         }
-        if (query.isEmpty()) {
-            return true;
-        }
-        StringBuilder hay = new StringBuilder(q.stemText);
-        hay.append(' ').append(q.path);
-        for (Question.Option o : q.options) {
-            hay.append(' ').append(o.text);
-        }
-        return Text.normalizeSearch(hay.toString()).contains(Text.normalizeSearch(query));
+        return hits == null || hits.contains(q.id);
     }
 
     private void startQuiz(int startIndex) {

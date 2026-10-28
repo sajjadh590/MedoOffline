@@ -98,14 +98,15 @@ public final class BankStore {
         if (!f.isFile()) {
             return null;
         }
-        Bank bank = Bank.parse(Io.readText(f));
+        // Bank.load sniffs the format: v2 is a zip read chunk by chunk, v1 is
+        // the old single JSON document.
+        Bank bank = Bank.load(f);
         Bank.remember(bank);
         return bank;
     }
 
     /** Validates before touching the saved file; a bad download cannot eat it. */
     public static Bank install(Context context, byte[] blob) throws Exception {
-        Bank bank = Bank.parse(new String(blob, "UTF-8"));
         File target = file(context);
         File tmp = new File(target.getAbsolutePath() + ".tmp");
         FileOutputStream out = new FileOutputStream(tmp);
@@ -116,6 +117,9 @@ public final class BankStore {
         } finally {
             out.close();
         }
+        // Parse the bytes actually on disk: a truncated download fails here,
+        // before the old bank is replaced.
+        Bank bank = Bank.load(tmp);
         if (!tmp.renameTo(target)) {
             target.delete();
             if (!tmp.renameTo(target)) {
@@ -170,7 +174,7 @@ public final class BankStore {
                     conn.setConnectTimeout(8000);
                     conn.setReadTimeout(30000);
                     conn.setInstanceFollowRedirects(true);
-                    conn.setRequestProperty("Accept", "application/json");
+                    conn.setRequestProperty("Accept", "application/zip,application/json,*/*");
                     int code = conn.getResponseCode();
                     if (code != 200) {
                         throw new java.io.IOException("سرور " + code + " پاسخ داد");
