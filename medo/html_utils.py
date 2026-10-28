@@ -7,6 +7,8 @@ import re
 from html.parser import HTMLParser
 from typing import Optional
 
+from medo.text_utils import INVISIBLE_RE as _INVIS_RE
+
 # Allowed tags for sanitized HTML
 ALLOWED_TAGS = frozenset({
     "div", "p", "br", "b", "strong", "i", "em", "u",
@@ -31,8 +33,8 @@ ALLOWED_ATTRS: dict[str, set[str]] = {
 # Style properties allowed in inline styles
 ALLOWED_STYLE_PROPS = {"color", "font-weight", "font-style", "text-decoration"}
 
-# Obfuscation: zero-width / invisible characters injected between letters
-_INVIS_RE = re.compile(r"[\u200b-\u200f\u2060-\u2064\ufeff]")
+# Obfuscation: zero-width / invisible characters injected between letters.
+# ZWNJ (U+200C) is not one of them — it is kept so Persian text reads right.
 
 
 def _attr(name: str, value: str) -> str:
@@ -97,7 +99,7 @@ class _Sanitizer(HTMLParser):
         classes = [c.lower() for c in (attr_dict.get("class") or "").split()]
         elem_id = (attr_dict.get("id") or "").lower()
         is_noise = (
-            "watermark" in classes
+            any("watermark" in c for c in classes)
             or any(c in {"yektanet", "mediaad"} for c in classes)
             or elem_id in {"pointpopup", "yektanet-ad", "mediaad"}
         )

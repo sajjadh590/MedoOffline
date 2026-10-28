@@ -4,25 +4,31 @@ Text normalization utilities.
 
 Strips invisible Unicode chars, normalises Arabic glyphs → Persian,
 applies NFKC normalization, collapses whitespace.
+
+One shared definition lives here: the site injects variation selectors
+(U+FE00..U+FE0F) and bidi controls between letters to poison scrapers, and
+earlier copies of this set in three modules missed them.
 """
 import re
 import unicodedata
 
-# Invisible / zero-width chars to strip
-_INVIS_CHARS = (
-    "\u200b"  # ZERO WIDTH SPACE
-    "\u200c"  # ZERO WIDTH NON-JOINER
-    "\u200d"  # ZERO WIDTH JOINER
-    "\u200e"  # LEFT-TO-RIGHT MARK
-    "\u200f"  # RIGHT-TO-LEFT MARK
-    "\u2060"  # WORD JOINER
-    "\u2061"  # FUNCTION APPLICATION
-    "\u2062"  # INVISIBLE TIMES
-    "\u2063"  # INVISIBLE SEPARATOR
-    "\u2064"  # INVISIBLE PLUS
-    "\ufeff"  # BOM / ZERO WIDTH NO-BREAK SPACE
+# Invisible / zero-width code points that carry no visual meaning.
+# ZWNJ (U+200C) is deliberately NOT here: it is real Persian orthography
+# («می‌شود»), so text shown to the reader keeps it; only hashing, option
+# signatures and search normalisation strip it.
+INVISIBLE_RANGES = (
+    "\u00ad"          # SOFT HYPHEN
+    "\u034f"          # COMBINING GRAPHEME JOINER
+    "\u061c"          # ARABIC LETTER MARK
+    "\u200b"          # ZERO WIDTH SPACE
+    "\u200d-\u200f"   # ZWJ, LEFT-TO-RIGHT MARK, RIGHT-TO-LEFT MARK
+    "\u202a-\u202e"   # bidi embedding / override
+    "\u2060-\u2069"   # WORD JOINER … INVISIBLE SEPARATOR
+    "\ufe00-\ufe0f"   # VARIATION SELECTORS (the site's obfuscation)
+    "\ufeff"          # BOM / ZERO WIDTH NO-BREAK SPACE
 )
-_INVIS_RE = re.compile(f"[{''.join(_INVIS_CHARS)}]")
+INVISIBLE_RE = re.compile(f"[{INVISIBLE_RANGES}]")
+INVISIBLE_OR_ZWNJ_RE = re.compile(f"[{INVISIBLE_RANGES}\u200c]")
 
 # Arabic forms → Persian canonical
 _ARABIC_MAP = str.maketrans(
@@ -34,9 +40,15 @@ _ARABIC_MAP = str.maketrans(
 )
 
 
-def strip_invisible(text: str) -> str:
-    """Remove all invisible / zero-width Unicode characters."""
-    return _INVIS_RE.sub("", text)
+def strip_invisible(text: str, *, keep_zwnj: bool = False) -> str:
+    """Remove invisible / zero-width Unicode characters.
+
+    ZWNJ is removed unless ``keep_zwnj`` is true — display fields pass true so
+    Persian half-spaces survive, while hashes and signatures keep the old,
+    canonical (ZWNJ-free) form.
+    """
+    pattern = INVISIBLE_RE if keep_zwnj else INVISIBLE_OR_ZWNJ_RE
+    return pattern.sub("", text)
 
 
 def normalize_text(text: str) -> str:

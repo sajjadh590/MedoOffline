@@ -330,3 +330,76 @@ def test_status_estimates_the_remaining_download_from_measured_average(tmp_path)
     assert usage["estimated_questions"] == 16          # 20 declared − 4 stored
     assert usage["estimated_bytes"] == 16 * 20_000
     assert usage["measured"] is True
+
+
+# ---------------------------------------------------------------------------
+# Subtopic-first downloads
+#
+# A whole-topic pass stored every question with tag NULL, so the sidebar's
+# subtopics stayed empty until a separate backfill ran.  When the tree knows
+# the subtopics, the controller must queue those instead.
+# ---------------------------------------------------------------------------
+
+def test_expand_subtopics_queues_the_tree_children(tmp_path):
+    from medo.db import upsert_category
+
+    db = tmp_path / "medo.db"
+    conn = get_connection(db)
+    init_db(conn)
+    upsert_category(conn, kind="topic", source_url="/qbank/topic-id-15",
+                    title="قلب", position=1, question_count=53)
+    upsert_category(conn, kind="subtopic",
+                    source_url="/qbank/topic-id-15?tag=2778",
+                    title="سندروم حاد کرونری", position=2, question_count=30)
+    upsert_category(conn, kind="subtopic",
+                    source_url="/qbank/topic-id-15?tag=2790",
+                    title="آریتمی", position=3, question_count=23)
+    conn.close()
+
+    wanted = [{"topic_id": 15, "tag_id": None, "subtopic_title": None}]
+    expanded = ScraperTaskController._expand_subtopics(db, wanted)
+
+    assert [t["tag_id"] for t in expanded] == [2778, 2790]
+    assert expanded[0]["subtopic_title"] == "سندروم حاد کرونری"
+    assert all(t["topic_id"] == 15 for t in expanded)
+
+
+def test_expand_subtopics_keeps_a_topic_without_children(tmp_path):
+    db = tmp_path / "medo.db"
+    conn = get_connection(db)
+    init_db(conn)
+    conn.close()
+
+    wanted = [{"topic_id": 99, "tag_id": None, "subtopic_title": None}]
+    assert ScraperTaskController._expand_subtopics(db, wanted) == wanted
+
+
+def test_expand_subtopics_never_touches_an_explicit_tag(tmp_path):
+    db = tmp_path / "medo.db"
+    conn = get_connection(db)
+    init_db(conn)
+    conn.close()
+
+    wanted = [{"topic_id": 15, "tag_id": 2778, "subtopic_title": "x"}]
+    assert ScraperTaskController._expand_subtopics(db, wanted) == wanted
+
+
+def test_truncated_subtopic_is_sent_back_to_page_one(tmp_path):
+    """A subtopic recorded complete with 1 of 7 questions must re-download."""
+    from medo.db import get_target_state, update_micro_state
+
+    db = tmp_path / "medo.db"
+    conn = get_connection(db)
+    init_db(conn)
+    update_micro_state(conn, 15, 2778, last_page=40, status="completed")
+    conn.close()
+
+    controller = ScraperTaskController.__new__(ScraperTaskController)
+    controller.db_path = db
+    controller._reset_truncated_target(15, 2778)
+
+    conn = get_connection(db)
+    state = get_target_state(conn, 15, 2778)
+    conn.close()
+    assert state["last_page"] == 0
+    assert state["status"] == "paused"

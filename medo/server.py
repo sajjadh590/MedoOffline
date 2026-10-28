@@ -31,6 +31,7 @@ from medo.db import (
     get_scrape_state,
     get_target_state,
     get_usage_summary,
+    update_micro_state,
     load_run_request,
     pending_resume_targets,
     reconcile_categories,
@@ -38,6 +39,7 @@ from medo.db import (
     save_run_request,
     set_bookmark,
     set_user_answer,
+    tag_id_of,
     toggle_bookmark,
 )
 from medo.exporter import export_web_bundle
@@ -171,6 +173,54 @@ class ScraperTaskController:
             unique.append(t)
         return unique
 
+    @staticmethod
+    def _expand_subtopics(db_path: Path | str, wanted: list[dict]) -> list[dict]:
+        """Queue a topic's subtopics instead of one unfiltered topic pass.
+
+        A whole-topic page never says which subtopic a question belongs to, so
+        that pass stored every question with tag NULL and left the sidebar's
+        subtopics empty until a separate backfill ran (and a re-download then
+        flipped tags back and forth).  When the tree knows the subtopics, each
+        one is queued as its own target: questions land under their subtopic in
+        the same pass, and a finished subtopic is skipped on the next run.
+        """
+        try:
+            conn = get_connection(db_path)
+        except Exception as ex:
+            applog.log(f"[scrape] subtopic expansion skipped: {ex}")
+            return wanted
+        try:
+            expanded: list[dict] = []
+            for target in wanted:
+                if target["tag_id"] is not None:
+                    expanded.append(target)
+                    continue
+                rows = conn.execute(
+                    "SELECT source_url, title FROM categories "
+                    "WHERE source_url LIKE ? ORDER BY position",
+                    (f"/qbank/topic-id-{target['topic_id']}?tag=%",),
+                ).fetchall()
+                subs = [
+                    {"topic_id": target["topic_id"],
+                     "tag_id": int(tag),
+                     "subtopic_title": row["title"]}
+                    for row in rows
+                    for tag in [tag_id_of(row["source_url"])]
+                    if tag
+                ]
+                if subs:
+                    applog.log(f"[scrape] topic {target['topic_id']}: "
+                               f"{len(subs)} subtopic(s) — downloading one by one")
+                    expanded.extend(subs)
+                else:
+                    expanded.append(target)
+            return expanded
+        except Exception as ex:
+            applog.log(f"[scrape] subtopic expansion failed: {ex}")
+            return wanted
+        finally:
+            conn.close()
+
     def start(
         self,
         topic_id: int = 0,
@@ -192,6 +242,7 @@ class ScraperTaskController:
                                          subtopic_title, targets)
         if not wanted:
             return False, "مبحثی برای استخراج انتخاب نشده است."
+        wanted = self._expand_subtopics(db_path, wanted)
         multi = len(wanted) > 1
         # Prefer the tree's own subtitle: it is what the sidebar shows and it
         # is always correctly encoded, unlike a client-supplied string.
@@ -278,7 +329,18 @@ class ScraperTaskController:
                         self._push(f"مبحث {index + 1} از {len(wanted)} — «{label}»"
                                    + (f" · تا اینجا {total_saved} سوال"
                                       if index else ""))
-                    done, done_status = self._target_progress(tid, tag)
+                    done, done_status, declared = self._target_progress(tid, tag)
+                    if (tag and done_status == "completed"
+                            and declared and done < declared):
+                        # A run that started ahead of the page (the session's
+                        # remembered position) then saw the disabled next
+                        # button and recorded a half-downloaded subtopic as
+                        # complete.  Re-queue it from page 1.
+                        self._reset_truncated_target(tid, tag)
+                        done_status = "paused"
+                        self._push(f"  ↳ «{label}» ناقص ذخیره شده بود "
+                                   f"({done} از {declared}) — از ابتدا دوباره "
+                                   f"دانلود می‌شود.")
                     if tag and done and done_status == "completed":
                         self._push(f"  ↳ «{label}» قبلاً کامل دانلود شده "
                                    f"({done} سوال) — دوباره دانلود نمی‌شود.")
@@ -735,26 +797,41 @@ class ScraperTaskController:
         except Exception:
             return 0
 
-    def _target_progress(self, topic_id: int, tag_id) -> tuple[int, str]:
-        """(questions already stored for this target, its stored status).
+    def _target_progress(self, topic_id: int, tag_id) -> tuple[int, str, int]:
+        """(stored questions, cursor status, declared questions) of a target.
 
         Used to skip a subtopic that already finished: a re-run of «دانلود
-        تک‌تک زیرمبحث‌ها» must not pay for the same pages twice.
+        تک‌تک زیرمبحث‌ها» must not pay for the same pages twice — unless the
+        stored count is below what the tree declares, which means the earlier
+        run stopped on the site's wrong page.
         """
         try:
             conn = get_connection(self.db_path)
             try:
                 if not tag_id:
-                    return 0, ""
+                    return 0, "", 0
                 n = int(conn.execute(
                     "SELECT count(*) FROM questions WHERE topic_id = ? AND tag_id = ?",
                     (int(topic_id), int(tag_id))).fetchone()[0])
                 state = get_target_state(conn, topic_id, tag_id) or {}
-                return n, str(state.get("status") or "")
+                declared = declared_questions(conn, int(topic_id), int(tag_id))
+                return n, str(state.get("status") or ""), int(declared or 0)
             finally:
                 conn.close()
         except Exception:
-            return 0, ""
+            return 0, "", 0
+
+    def _reset_truncated_target(self, topic_id: int, tag_id: int) -> None:
+        """Send a truncated subtopic back to page 1 on its next run."""
+        try:
+            conn = get_connection(self.db_path)
+            try:
+                update_micro_state(conn, int(topic_id), int(tag_id),
+                                   last_page=0, status="paused")
+            finally:
+                conn.close()
+        except Exception as ex:
+            applog.log(f"[scrape] could not reset truncated subtopic: {ex}")
 
     def _db_grew(self) -> bool:
         """True when the question count exceeded the pre-run snapshot.

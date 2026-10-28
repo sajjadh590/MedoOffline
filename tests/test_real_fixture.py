@@ -60,12 +60,12 @@ class TestRealFixture:
         assert "SGLT2" in q.explanation_text
 
     def test_no_invisible_chars_in_text_fields(self, q):
-        import re
-        inv = re.compile("[‌-‏⁠-⁤﻿]")
-        assert not inv.search(q.stem_text)
-        assert not inv.search(q.explanation_text or "")
-        for o in q.options:
-            assert not inv.search(o.text)
+        from medo.text_utils import strip_invisible
+        # ZWNJ is real Persian orthography, so it is allowed (and required)
+        # in display text; every other invisible code point is not.
+        for field in (q.stem_text, q.explanation_text or "",
+                      *(o.text for o in q.options)):
+            assert field == strip_invisible(field, keep_zwnj=True)
 
     def test_no_obfuscation_junk_in_html_fields(self, q):
         for html in (q.stem_html, q.explanation_html or ""):

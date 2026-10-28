@@ -39,11 +39,15 @@ def normalize_options(options) -> str:
     texts are plain in the HTML, which is why they are the identity here.
     """
     from medo.parser import _clean_text
+    from medo.text_utils import strip_invisible
 
     parts = []
     for option in options or []:
         text = option.get("text") if isinstance(option, dict) else getattr(option, "text", "")
-        parts.append(re.sub(r"\s+", "", _clean_text(str(text or ""))))
+        # Signatures must ignore the half-space: one side of the comparison may
+        # have lost it in older rows.
+        clean = strip_invisible(_clean_text(str(text or "")))
+        parts.append(re.sub(r"\s+", "", clean))
     return "|".join(parts)
 
 

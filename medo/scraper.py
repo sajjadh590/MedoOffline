@@ -1049,8 +1049,71 @@ class Harvester:
             return page.locator("#label1").count() > 0
 
     @staticmethod
+    def _mark_hidden(page: Page) -> None:
+        """Tag what the page hides, so the parser can drop the decoy blocks.
+
+        The hiding rule lives in a per-load stylesheet that ``page.content()``
+        does not include (it is injected by the site's JS), so computed style
+        is the only reliable signal.  Only definite hiding counts — a zero-size
+        box is skipped because a not-yet-loaded image would look the same.
+        """
+        try:
+            page.evaluate(
+                """() => {
+                  const hidden = (el) => {
+                    const s = getComputedStyle(el);
+                    if (s.display === 'none') return true;
+                    if (s.visibility === 'hidden' || s.visibility === 'collapse') return true;
+                    if (parseFloat(s.opacity) === 0) return true;
+                    if (s.position === 'absolute' || s.position === 'fixed') {
+                      if (parseFloat(s.left) <= -9999) return true;
+                    }
+                    return false;
+                  };
+                  document.querySelectorAll('#qtxt *, #block-b *').forEach((el) => {
+                    if (hidden(el)) el.setAttribute('data-medo-hidden', '1');
+                  });
+                }"""
+            )
+        except PlaywrightError:
+            pass  # a page mid-navigation: the next parse will retry
+
+    @staticmethod
+    def _wait_for_reveal(page: Page, timeout_ms: int = 8000) -> bool:
+        """Wait until #block-b is visible with real text (or a mindmap image).
+
+        The old fixed 700-800 ms wait captured half-built lessons on a slow
+        page; innerText ignores display:none, so decoy blocks do not count.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                state = page.evaluate(
+                    """() => {
+                      const b = document.querySelector('#block-b');
+                      if (!b) return null;
+                      const s = getComputedStyle(b);
+                      return {
+                        visible: s.display !== 'none' && s.visibility !== 'hidden'
+                                 && parseFloat(s.opacity) !== 0,
+                        text: (b.innerText || '').trim(),
+                        img: !!b.querySelector('img[src]'),
+                      };
+                    }"""
+                )
+            except PlaywrightError:
+                return False
+            if state and state.get("visible") and (
+                len(state.get("text") or "") > 0 or state.get("img")
+            ):
+                return True
+            page.wait_for_timeout(350)
+        return False
+
+    @staticmethod
     def _parse_visible(page: Page, topic_id: int, page_no: int,
                        submitted: bool = False) -> ParsedQuestion:
+        Harvester._mark_hidden(page)
         html = page.content()
         return parse_question_html(
             html,
@@ -1109,7 +1172,7 @@ class Harvester:
             btn = page.locator("#show-b-btn")
             if btn.count() > 0 and btn.is_visible():
                 btn.click(timeout=4000)
-                page.wait_for_timeout(700)
+                cls._wait_for_reveal(page)
             return cls._parse_visible(page, topic_id, page_no, submitted=True)
         except PlaywrightError:
             return None
@@ -1131,7 +1194,7 @@ class Harvester:
             if btn.count() == 0 or not btn.is_visible():
                 return q
             btn.click(timeout=4000)
-            page.wait_for_timeout(800)
+            cls._wait_for_reveal(page)
             q2 = cls._parse_visible(page, topic_id, page_no, submitted=True)
         except PlaywrightError:
             return q
@@ -1178,13 +1241,18 @@ class Harvester:
 
     @classmethod
     def _click_next(cls, page: Page) -> bool:
-        """Click the live next button and wait for a different question.
+        """Click the live next button and wait for a different question."""
+        return cls._click_nav(page, "next")
+
+    @classmethod
+    def _click_nav(cls, page: Page, role: str) -> bool:
+        """Click the live nav button (`next`/`prev`) and wait for a new question.
 
         Tries the candidate buttons from last to first: the visible live one
         is last, and a stale clone either intercepts the click or does
         nothing, which used to end a run as if the topic were finished.
         """
-        btns = page.locator('button[data-nav-role="next"]')
+        btns = page.locator(f'button[data-nav-role="{role}"]')
         count = btns.count()
         if count == 0:
             return False
@@ -1233,16 +1301,23 @@ class Harvester:
                 return False
             return self._wait_for_question(page)
 
-        if target > 1:
-            # Fast path: server-side ?page=N — accepted only if the page's own
-            # counter agrees (the site may restore its session position).
-            if load(topic_url(topic_id, page=target, tag_id=tag_id)):
-                cur, _ = position()
-                if cur == target:
-                    return cur
-            self._polite_delay()
+        # Always ask for the exact page, *including page 1*.  Without page=1
+        # the site restores the reader's remembered position: a subtopic run
+        # then started 50 questions ahead, stored nothing, and marked itself
+        # complete.
+        if load(topic_url(topic_id, page=target, tag_id=tag_id)):
+            cur, total = position()
+            if cur == target:
+                return cur
+            if total is not None and target > total:
+                # The counter says the list ends before the requested page:
+                # this target really is finished.  -1 means "complete", which
+                # the caller must not confuse with a navigation failure.
+                return -1
+            applog.log(f"[position] requested page {target}, site shows {cur}")
+        self._polite_delay()
 
-        if not load(topic_url(topic_id, tag_id=tag_id)):
+        if not load(topic_url(topic_id, page=1, tag_id=tag_id)):
             return None
         cur, total = position()
         if cur is None:
@@ -1255,11 +1330,19 @@ class Harvester:
             return target
 
         if total is not None and target > total:
-            # The page's own counter says the list ends before the requested
-            # page: this target really is finished.  -1 tells the caller that
-            # this is a completed topic, not a navigation failure (the old
-            # code made both look identical).
             return -1
+        # Never start ahead of the target, even by one question.
+        while cur > target:
+            if not self._click_nav(page, "prev"):
+                applog.log(f"[position] cannot move back to page {target}; "
+                           f"site still shows {cur} — pausing instead of "
+                           f"skipping the earlier questions")
+                return None
+            self._polite_delay()
+            nxt, _ = position()
+            if nxt is None or nxt >= cur:
+                return None
+            cur = nxt
         while cur < target:
             if self._next_state(page) != "ready":
                 return None
@@ -1270,9 +1353,6 @@ class Harvester:
             if nxt is None or nxt <= cur:
                 return None
             cur = nxt
-        # `cur` may legitimately be ahead of the stored cursor (the session
-        # remembered more progress than the database did).  Starting there is
-        # correct; starting at `target` with the wrong question is not.
         return cur
 
     # -- question persistence ------------------------------------------------

@@ -47,9 +47,11 @@ BASE = "https://medofast.ir"
 
 def signature(options) -> str:
     """Stable fingerprint of the option texts (spacing/ZWNJ insensitive)."""
+    from medo.text_utils import strip_invisible
+
     parts = []
     for option in options:
-        text = _clean_text(option.text or "")
+        text = strip_invisible(_clean_text(option.text or ""))
         parts.append(re.sub(r"\s+", "", text))
     return "|".join(parts)
 

@@ -185,7 +185,9 @@ class TestDecoyAndInvisibleLeak:
         "گزینه جعلی",
     ]
 
-    INVISIBLE_CHARS = list("\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff")
+    # ZWNJ (U+200C) is excluded: it is real Persian orthography and display
+    # fields keep it on purpose.
+    INVISIBLE_CHARS = list("\u200b\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff")
 
     @pytest.fixture(scope="class")
     @classmethod
@@ -283,8 +285,8 @@ class TestBeforeFixture:
         assert "EF" in q.stem_text or "35" in q.stem_text
 
     def test_stem_no_invisible_chars(self, q):
-        invis = re.compile(r"[\u200b-\u200f\u2060-\u2064\ufeff]")
-        assert not invis.search(q.stem_text)
+        # ZWNJ is allowed (Persian half-space); nothing else is.
+        assert q.stem_text == strip_invisible(q.stem_text, keep_zwnj=True)
 
     def test_explanation_marker_detected(self, q):
         """Marker is present in DOM even before submit — correct_index readable."""
@@ -499,3 +501,129 @@ class TestDeterminism:
         q2 = _load_parsed(AFTER,  submitted=True)
         # Stem and options text are the same; only colours/display differ
         assert q1.content_hash == q2.content_hash
+
+
+# ---------------------------------------------------------------------------
+# Pro lessons: hidden decoys, injected variation selectors, lock detection
+#
+# The Pro page ships 12 .element-container blocks; 3 belong to unrelated
+# topics and are hidden only by a rule in a per-load stylesheet.  A previous
+# parser serialised #block-b wholesale, so every lesson ended with those three
+# foreign paragraphs (and with the «MedoFast.ir» stamp).
+# ---------------------------------------------------------------------------
+
+_REAL_BLOCK = (
+    '<div id="element-40a947341c61cb694d50a219755eec2a" class="element-container"'
+    ' data-element-id="40a947341c61cb694d50a219755eec2a" data-order="5">'
+    '<div class="realInnerB"><p>تروپونین قلب پس از STEMI تا 10 روز بالا می‌ماند.'
+    ' <span>(تایید گزینه 1)</span></p></div></div>'
+)
+
+_DECOY_CSS_BLOCK = (
+    '<div id="element-3014dd29-bf74-4279-9818-b2342a942682" class="element-container"'
+    ' data-element-id="3014dd29-bf74-4279-9818-b2342a942682" data-order="2">'
+    '<div class="decoyInnerA"><p>سلولیت ناشی از شنا در آب شیرین است.</p></div></div>'
+)
+
+# Same decoy, but the page's stylesheet never made it into the capture.
+_DECOY_NO_CSS_BLOCK = _DECOY_CSS_BLOCK.replace(
+    '="3014dd29-bf74-4279-9818-b2342a942682"', '="8f14e45f-bb1a-4c4b-9f11-0a1b2c3d4e5f"'
+).replace("سلولیت ناشی از شنا در آب شیرین است.", "اقدام عمدی به نقص عضو و خودآزاری.")
+
+
+def _explanation_page(explanation: str, *, extra_blocks: str = "",
+                      css: str = "", denied: bool = False) -> str:
+    """A live-shaped page whose #block-b holds `explanation`."""
+    denied_panel = ('<div id="premium-access-denied"><p>پاسخ تشریحی فقط برای پرو</p></div>'
+                    if denied else "")
+    return f"""<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="UTF-8">
+<style>
+  div.realInnerB {{ display: block !important; }}
+  {css}
+</style></head><body>
+<div class="questionContentWrapper" id="questionContentWrapper">
+  <div id="questions-container">
+    <div id="question-meta" data-pqrfhskdjf="1473" data-mnofhskdjf="15"></div>
+    <div class="qtext-before mb-3" id="qtxt">
+      <div class="stemWrap"><p>بیمار ۵۰ ساله با درد قفسه سینه؛ کدام شاخص ارجح است؟</p></div>
+    </div>
+    <label id="label1"><span data-encoded-text="Q2FyZGlhYyB0cm9wb25pbiBU">a</span></label>
+    <label id="label2"><span data-encoded-text="2qnYsdin2KrbjNmGINqp24zZhtin2LI=">b</span></label>
+    <label id="label3"><span data-encoded-text="Q0stTUI=">c</span></label>
+    <label id="label4"><span data-encoded-text="TERI">d</span></label>
+    <div id="block-b"><div class="answerbox">
+      <div id="element-40a947341c61cb694d50a219755eec2a" class="element-container"
+           data-element-id="40a947341c61cb694d50a219755eec2a">
+        <div class="realInnerB"><p>{explanation}</p></div>
+      </div>
+      {extra_blocks}
+      <div class="answer-watermark">MedoFast.ir</div>
+    </div></div>
+  </div>
+  {denied_panel}
+</div>
+</body></html>"""
+
+
+class TestExplanationCleanup:
+    def test_hidden_decoy_block_is_dropped(self):
+        page = _explanation_page(
+            "تروپونین قلب تا ۱۰ روز بالا می‌ماند.",
+            extra_blocks=_DECOY_CSS_BLOCK,
+            css="div.decoyInnerA { display: none !important; left: -9999px !important; }",
+        )
+        q = parse_question_html(page, submitted=True)
+        assert "سلولیت" not in q.explanation_text
+        assert "تروپونین قلب" in q.explanation_text
+        assert q.explanation_status == ExplanationStatus.FULL
+
+    def test_uuid_decoy_is_dropped_without_its_stylesheet(self):
+        """An offline capture can miss the cid: CSS part; the id shape still tells."""
+        q = parse_question_html(
+            _explanation_page("تروپونین قلب تا ۱۰ روز بالا می‌ماند.",
+                              extra_blocks=_DECOY_NO_CSS_BLOCK),
+            submitted=True,
+        )
+        assert "خودآزاری" not in q.explanation_text
+
+    def test_answer_watermark_never_reaches_the_lesson(self):
+        q = parse_question_html(_explanation_page("تروپونین قلب بالا می‌ماند."),
+                                submitted=True)
+        assert "MedoFast.ir" not in (q.explanation_text or "")
+        assert "MedoFast.ir" not in (q.explanation_html or "")
+
+    def test_variation_selectors_are_stripped(self):
+        invisible = "\ufe0f\ufe00\u200b\u2060"
+        page = _explanation_page(
+            f"پرو{invisible}تئین و پرو{invisible}گنوز در متن درس آمده است."
+        )
+        q = parse_question_html(page, submitted=True)
+        assert set(invisible) & set(q.explanation_text or "") == set()
+        assert "پروتئین" in q.explanation_text
+
+    def test_zwnj_survives_in_display_text(self):
+        q = parse_question_html(_explanation_page("بیماری‌های گلومرولی شایع‌اند."),
+                                submitted=True)
+        assert "\u200c" in q.explanation_text
+        assert "گلومرولی" in q.explanation_text
+
+
+class TestLockDetection:
+    def test_long_lesson_mentioning_pro_words_is_full(self):
+        """«پروگنوز»/«پروتئین» inside a real lesson must not mean LOCKED."""
+        lesson = ("پروگنوز این بیمار خوب است و پروتئین واکنش‌گر C بالا رفته است. "
+                  "Procalcitonin نیز افزایش دارد و پروستات طبیعی است. " * 3)
+        q = parse_question_html(_explanation_page(lesson), submitted=True)
+        assert q.explanation_status == ExplanationStatus.FULL
+
+    def test_short_paywall_notice_is_locked(self):
+        q = parse_question_html(
+            _explanation_page("جهت مشاهده پاسخ تشریحی، اشتراک مدوفست پرو فعال کنید."),
+            submitted=True,
+        )
+        assert q.explanation_status == ExplanationStatus.LOCKED
+
+    def test_paywall_panel_marks_the_question_locked(self):
+        q = parse_question_html(
+            _explanation_page("متن کوتاه", denied=True), submitted=True)
+        assert q.explanation_status == ExplanationStatus.LOCKED

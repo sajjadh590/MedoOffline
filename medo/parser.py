@@ -18,6 +18,7 @@ Key rules (from site analysis):
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import unicodedata
 from html.parser import HTMLParser
@@ -25,13 +26,16 @@ from typing import Optional
 
 from medo.html_utils import html_to_text, sanitize_html
 from medo.models import AnswerSource, ExplanationStatus, ParsedImage, ParsedOption, ParsedQuestion
-from medo.text_utils import normalize_single_line, normalize_text, strip_invisible
+from medo.text_utils import INVISIBLE_RE, normalize_single_line, strip_invisible
 
 # ---------------------------------------------------------------------------
 # Low-level HTML helpers (pure-Python, no external deps required for tests)
 # ---------------------------------------------------------------------------
 
-_INVIS_RE = re.compile(r"[\u200b-\u200f\u2060-\u2064\ufeff]")
+# One shared set (text_utils) — the old local copies missed the variation
+# selectors the site injects between letters.
+_INVIS_RE = INVISIBLE_RE
+log = logging.getLogger(__name__)
 
 
 class _AttrExtractor(HTMLParser):
@@ -205,7 +209,11 @@ class _MiniDom(HTMLParser):
         if eid in _NOISE_IDS:
             return True
         cls = attrs.get("class", "").lower().split()
-        if any(c in {"watermark", "yektanet", "mediaad"} for c in cls):
+        # `answer-watermark` holds the trailing «MedoFast.ir» stamp that used
+        # to end every stored explanation.
+        if any("watermark" in c for c in cls) or any(
+            c in {"yektanet", "mediaad"} for c in cls
+        ):
             return True
         return False
 
@@ -275,6 +283,40 @@ class _MiniDom(HTMLParser):
 # MHTML reader
 # ---------------------------------------------------------------------------
 
+def _cid_styles(msg) -> list[str]:
+    """text/css parts addressed as `cid:` — Chrome stores page CSS that way."""
+    styles: list[str] = []
+
+    def walk(part) -> None:
+        if part.is_multipart():
+            for sub in part.get_payload():
+                if not isinstance(sub, str):
+                    walk(sub)
+            return
+        if part.get_content_type() != "text/css":
+            return
+        if not (part.get("Content-Location") or "").strip().lower().startswith("cid:"):
+            return
+        payload = part.get_payload(decode=True)
+        if payload:
+            styles.append(payload.decode(part.get_content_charset() or "utf-8",
+                                          errors="replace"))
+
+    walk(msg)
+    return styles
+
+
+def _inline_cid_styles(html: str, styles: list[str]) -> str:
+    """Put the saved CSS into <head> so the cascade can be evaluated offline."""
+    if not styles:
+        return html
+    block = "".join(f"<style>{css}</style>" for css in styles)
+    head_end = html.lower().find("</head>")
+    if head_end == -1:
+        return block + html
+    return html[:head_end] + block + html[head_end:]
+
+
 def extract_html_from_mhtml(mhtml_bytes: bytes) -> str:
     """
     Extract the first text/html part from an MHTML file.
@@ -312,7 +354,7 @@ def extract_html_from_mhtml(mhtml_bytes: bytes) -> str:
 
     html = _find_html(msg)
     if html:
-        return html
+        return _inline_cid_styles(html, _cid_styles(msg))
 
     # ---- Strategy 2: regex fallback (handles malformed MIME) ----
     # Find a base64-encoded block that follows a "Content-Type: text/html" header.
@@ -395,11 +437,20 @@ def _parse_compound(sel: str) -> Optional[tuple[Optional[str], list[str]]]:
     return tag, classes
 
 
+_CSS_NESTED_AT_RE = re.compile(r"@(media\s+print|keyframes)[^{]*\{(?:[^{}]*\{.*?\})*[^{}]*\}", re.S | re.I)
+
+
 def _collect_css_rules(html: str) -> list[tuple[Optional[str], list[str], dict, int]]:
-    """All parsable rules from every <style> block, in document order."""
+    """All parsable rules from every <style> block, in document order.
+
+    ``@media print`` and ``@keyframes`` blocks are removed first: the site's
+    main stylesheet hides <body> for printing, which would make every block
+    look invisible.
+    """
     rules: list[tuple[Optional[str], list[str], dict, int]] = []
     order = 0
     for block in _STYLE_BLOCK_RE.findall(html):
+        block = _CSS_NESTED_AT_RE.sub("", block)
         for sel, body in _CSS_RULE_RE.findall(block):
             decls = _parse_declarations(body)
             if not decls:
@@ -438,11 +489,16 @@ def _effective_decls(node: dict, rules: list) -> dict[str, str]:
     return {p: v for p, (_k, v) in best.items()}
 
 
-def _is_visible(node: dict, rules: list) -> bool:
+def _is_visible(node: dict, rules: list, stop: Optional[dict] = None) -> bool:
     """display!=none, visibility:visible, not parked off-screen, for the whole
-    ancestor chain (a hidden parent hides every child)."""
+    ancestor chain (a hidden parent hides every child).
+
+    ``stop`` excludes that ancestor and everything above it: #block-b is
+    display:none until the reader submits, which says nothing about the
+    blocks inside it.
+    """
     cur: Optional[dict] = node
-    while cur is not None and cur.get("tag") != "#root":
+    while cur is not None and cur.get("tag") != "#root" and cur is not stop:
         decls = _effective_decls(cur, rules)
         if decls.get("display") == "none":
             return False
@@ -537,6 +593,147 @@ def find_stem_node(dom: "_MiniDom", rules: list) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Explanation blocks: the site hides decoys inside #block-b
+#
+# The Pro page ships 12 .element-container blocks; 3 come from unrelated
+# topics and are hidden by a rule in a per-load stylesheet (display:none,
+# opacity:0, left:-9999px).  Their data-element-id is a hyphenated UUID while
+# the 9 real blocks use a plain 32-hex id.  Keeping them appended three
+# foreign paragraphs to every lesson.
+# ---------------------------------------------------------------------------
+
+_UUID_STYLE_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_ELEMENT_CONTAINER = "element-container"
+
+
+def _block_info(node: dict, rules: list, stop: Optional[dict] = None) -> dict:
+    """Both hidden-signals for one .element-container."""
+    attrs = node.get("attrs", {})
+    element_id = attrs.get("data-element-id") or attrs.get("id", "")
+    css_hidden = not _is_visible(node, rules, stop)
+    uuid_style = bool(_UUID_STYLE_RE.match(element_id))
+    marked_hidden = attrs.get("data-medo-hidden") == "1"
+    if (css_hidden or marked_hidden) and not uuid_style:
+        # A plain 32-hex block hidden by the page: it may be real content, so
+        # say so once per block instead of silently losing it.
+        log.warning(
+            "explanation block %r hidden by the page but not UUID-styled",
+            element_id,
+        )
+    return {
+        "element_id": element_id,
+        "order": attrs.get("data-order", ""),
+        "css_hidden": css_hidden,
+        "uuid_style": uuid_style,
+        "marked_hidden": marked_hidden,
+        "hidden": marked_hidden or css_hidden or uuid_style,
+        "text": normalize_single_line(_node_text(node)),
+    }
+
+
+def _node_text(node: dict) -> str:
+    if node.get("tag") == "#text":
+        return node.get("text", "")
+    return "".join(_node_text(child) for child in node.get("children", []))
+
+
+def _containers(node: dict):
+    """Every .element-container below `node`, at any depth."""
+    for child in node.get("children", []):
+        if child.get("tag") == "#text":
+            continue
+        if _ELEMENT_CONTAINER in child.get("attrs", {}).get("class", "").split():
+            yield child
+        yield from _containers(child)
+
+
+def explanation_blocks(html: str) -> list[dict]:
+    """Every .element-container in #block-b with its hidden-signals.
+
+    Read-only: used by scripts/dev/check_captures.py and the parser tests to
+    show which blocks a page offers and which ones the parser drops.
+    """
+    dom = _MiniDom()
+    dom.feed(html)
+    block_b = dom.find_by_id("block-b")
+    if block_b is None:
+        return []
+    rules = _collect_css_rules(html)
+    return [_block_info(node, rules, block_b) for node in _containers(block_b)]
+
+
+def _explanation_html(dom: "_MiniDom", block_b: dict, rules: list) -> str:
+    """#block-b with its decoy blocks removed.
+
+    A block goes when the page marks it hidden (inline CSS rule or the live
+    browser's data-medo-hidden), or when its id is a hyphenated UUID — the
+    second signal is only trusted on pages that also carry plain 32-hex ids,
+    so a template change cannot empty the whole lesson.
+    """
+    infos = {id(node): _block_info(node, rules, block_b)
+             for node in _containers(block_b)}
+    id_shape_usable = any(
+        info["element_id"] and not info["uuid_style"] for info in infos.values()
+    )
+
+    def prune(node: dict) -> Optional[dict]:
+        if node.get("tag") == "#text":
+            return node
+        if (not _is_visible(node, rules, block_b)
+                or node.get("attrs", {}).get("data-medo-hidden") == "1"):
+            return None
+        info = infos.get(id(node))
+        if info is not None and (
+            info["marked_hidden"]
+            or info["css_hidden"]
+            or (id_shape_usable and info["uuid_style"])
+        ):
+            return None
+        pruned = {
+            "tag": node.get("tag", "div"),
+            "attrs": node.get("attrs", {}),
+            "children": [c for c in (prune(k) for k in node.get("children", []))
+                         if c is not None],
+        }
+        if info is not None:
+            # Decoys hold their hidden rule on an inner div, so the container
+            # itself looks visible; once the hidden part is gone, an empty
+            # text-only block is a decoy too.
+            has_image = any(el.get("tag") == "img" for el in _walk(pruned))
+            if not has_image and not normalize_single_line(dom.inner_text(pruned)):
+                return None
+        return pruned
+
+    return dom.inner_html(prune(block_b))
+
+
+# A lock notice is short and says so; a lesson that merely mentions «پروتئین»,
+# «پروگنوز» or «Procalcitonin» is not locked.
+_LOCK_TEXT_RES = (
+    re.compile(r"اشتراک\s+(?:مدوفست\s+)?پرو"),
+    re.compile(r"فعال\s*سازی\s+مدوفست\s+پرو"),
+    re.compile(r"مشاهده\s+پاسخ\s+تشریحی"),
+    re.compile(r"(?<![\w\u0600-\u06FF])پرو(?![\w\u0600-\u06FF])"),
+    re.compile(r"(?<![\w])Pro(?![\w])", re.IGNORECASE),
+    re.compile(r"ورود\s+کنید"),
+)
+_LOCK_TEXT_MAX = 200
+
+
+def _is_locked_explanation(text: Optional[str], dom: "_MiniDom") -> bool:
+    """True only when the page itself is the paywall / lock notice."""
+    if dom.find_by_id("premium-access-denied") is not None:
+        return True
+    flat = normalize_single_line(text or "")
+    if not flat or len(flat) >= _LOCK_TEXT_MAX:
+        return False
+    return any(pattern.search(flat) for pattern in _LOCK_TEXT_RES)
+
+
+# ---------------------------------------------------------------------------
 # Main parser
 # ---------------------------------------------------------------------------
 
@@ -550,8 +747,12 @@ def _extract_images(html: str, role: str) -> list[ParsedImage]:
 
 
 def _clean_text(raw: str) -> str:
-    """Strip invisible chars, NFKC-normalise, collapse whitespace."""
-    raw = _INVIS_RE.sub("", raw)
+    """Strip invisible chars, NFKC-normalise, collapse whitespace.
+
+    ZWNJ survives here: it is Persian orthography, not obfuscation.  Hash
+    inputs and signatures still normalise it away (text_utils).
+    """
+    raw = strip_invisible(raw, keep_zwnj=True)
     raw = unicodedata.normalize("NFKC", raw)
     # Arabic ي/ك → Persian
     raw = raw.replace("\u0643", "\u06a9").replace("\u064a", "\u06cc").replace("\u0649", "\u06cc")
@@ -654,7 +855,7 @@ def parse_question_html(
     # 3. Explanation  (#block-b .qtext-after)
     # ------------------------------------------------------------------
     block_b = dom.find_by_id("block-b")
-    expl_html_raw  = dom.inner_html(block_b) if block_b else ""
+    expl_html_raw  = _explanation_html(dom, block_b, css_rules) if block_b else ""
     expl_html      = sanitize_html(expl_html_raw) if expl_html_raw else None
     expl_text      = _clean_text(html_to_text(expl_html_raw)) if expl_html_raw else None
 
@@ -729,8 +930,7 @@ def parse_question_html(
     # 5. Explanation status
     # ------------------------------------------------------------------
     if expl_text:
-        expl_lower = expl_text.lower()
-        if any(kw in expl_text for kw in ("اشتراک", "پرو", "Pro", "ورود کنید", "تهیه اشتراک")):
+        if _is_locked_explanation(expl_text, dom):
             explanation_status = ExplanationStatus.LOCKED
         elif correct_index is not None and len(expl_text) < 30:
             explanation_status = ExplanationStatus.KEY_ONLY
