@@ -179,6 +179,9 @@ def test_index_is_light_and_chunks_hold_the_bodies(seeded_db):
     entry = index["questions"][0]
     assert "explanation_html" not in entry and "options" not in entry
     assert entry["chunk"] == index["chunks"][0]["id"]
+    # List rows show «۴ گزینه · پاسخ تشریحی» without reading the chunk.
+    assert entry["options_count"] == 4
+    assert entry["has_explanation"] is True
     assert chunk["questions"][0]["explanation_html"]
 
 

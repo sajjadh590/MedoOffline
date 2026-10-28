@@ -385,13 +385,13 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
 
 ---
 
-## 8. Current state (as of the end of phases 0-6, 2026-10-28)
+## 8. Current state (as of the end of the phase 7 batch, 2026-10-28)
 
 **Verified**
-- `./.venv/Scripts/python -m pytest -q` → **283 passed** (plus 11 skips on a clean
+- `./.venv/Scripts/python -m pytest -q` → **300 passed** (plus 11 skips on a clean
   clone only when `data/diag` has no real capture).
-- `bash android/test.sh` → **ALL PASSED (140 checks)** (zip bundle, word search, shared
-  normalization vectors, padded-stride QR, section answer keys).
+- `bash android/test.sh` → **ALL PASSED (147 checks)** (zip bundle + lazy chunks/LRU,
+  word search, shared normalization vectors, padded-stride QR, section answer keys).
 - `bash android/build.sh` → `dist/medo.apk` **v1.2**; versionCode now comes from
   `android/AndroidManifest.xml` and is bumped to 3 after a successful build.
 - `node --check medo/web/app.js`, `node --check medo/web/normalize.js`, `python -m compileall medo`
@@ -438,16 +438,20 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
   export of HEAD.
 - Docs: this brief's companion log moved to `docs/history.md`; `NOTES.md` is now
   the concise current-state page.
+- Stress: `scripts/dev/make_big_bank.py` (20k synthetic questions),
+  `scripts/dev/bench_bank.py` (HTTP, Chrome UI, Android JVM), and the lazy chunk
+  loader (`Bank` keeps the index light, hydrates one chunk, caches the newest two).
+  Web at 20k: ~26 s first screen, 36.8 MB of light JSON, ~0.4 s search.
 
 **Known-open (do not claim these are done)**
 1. **Live verification against medofast.ir is still blocked on this machine** — no real
    login, no live scrape, no live repair, no live tag sync in these sessions. Everything
    is unit-tested and logs its evidence (`medo doctor`, `medo diagnose-live`, `logs/medo.log`).
-2. **The `.medo` zip loads its chunks eagerly (streamed one at a time), not lazily with an
-   LRU of 2.** The memory problem that mattered was the three copies of the whole file
-   (`byte[]` → `String` → tree); this removes them while staying with an immutable
-   `Question`. A synthetic 20k bank + a device heap measurement decides whether the lazy
-   per-chunk cache is actually needed.
+2. **The phone bank is now lazy (LRU 2), measured on the JVM only.** The light index
+   loads first; `Bank.question(id)` reads that chunk and keeps the newest two.
+   `-Xmx128m` loads 20k synthetic questions in ~1.1 s (peak 93 MB, settled 26 MB);
+   before this it ran out of memory at 128 MB. `-Xmx64m` still fails while parsing the
+   index. No device/emulator here: verify with `adb shell dumpsys meminfo ir.medo.app`.
 3. **QR scanner and phone PDF have never been run on a real device** — only JVM tests and
    compilation.
 4. `Image` transfer to the phone is opt-in (`build-bank --images`); the default bank is
@@ -468,6 +472,8 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
 node --check medo/web/app.js                 # JS syntax
 ./.venv/Scripts/python scripts/dev/clean_clone_test.py   # archive HEAD, audit, pytest
 ./.venv/Scripts/python scripts/dev/audit_push.py         # never commit private content
+./.venv/Scripts/python scripts/dev/make_big_bank.py --db build/stress/medo.db --reset
+./.venv/Scripts/python scripts/dev/bench_bank.py         # web + Android JVM at 20k
 
 # Desktop app
 ./.venv/Scripts/python launcher.py           # server + browser (or the desktop shortcut)
@@ -531,6 +537,7 @@ change one of these areas; each line was verified by the check named at the end.
 | Repair safety + backup | `medo/backup.py`, `medo/answer_audit.py`, `medo/server.py`, `scripts/backfill_tags.py` | `tests/test_answer_audit.py`, `tests/test_backfill_tags.py` |
 | One pasteable live report | `medo/live_report.py`, `medo/cli.py` (`live-report`) | `tests/test_live_report.py` |
 | Push audit + clean clone | `scripts/dev/audit_push.py`, `scripts/dev/clean_clone_test.py` | `tests/test_audit_push.py`, the clean-clone run itself |
+| Stress + lazy phone bank | `scripts/dev/make_big_bank.py`, `scripts/dev/bench_bank.py`, `android/.../Bank.java`, `android/.../Question.java`, `medo/share.py` | `tests/test_big_bank.py`, `tests/test_android_bundle.py`, `android/test.sh` (147) |
 
 **Known-open work, in the order it should be done**
 
@@ -538,10 +545,10 @@ change one of these areas; each line was verified by the check named at the end.
    routed direct (`domain:medofast.ir`, `geosite:ir`), run `medo doctor --deep`,
    then one small scrape, then `diagnose-tags` and one repair run. Record the
    output in `NOTES.md`; until then do not claim those paths work live.
-2. **Synthetic stress test.** Build 20,000 fake questions with
-   `scripts/dev/make_big_bank.py`, then measure web load/search and Android load
-   + peak heap. Add lazy phone chunks (LRU 2, hydrating `question(id)` /
-   `forNode(node)` from `positions`) only if a device exceeds a safe heap.
+2. **Device test of the lazy bank.** Install the APK + a 20k bundle, open a topic,
+   quiz a question, browse categories, export one section's PDF, then read
+   `adb shell dumpsys meminfo ir.medo.app`. The JVM proxy (`scripts/dev/bench_bank.py`)
+   already shows 128 MB is enough; a phone is not the same as the JVM.
 3. **FTS5 removal (deferred).** It is now only exercised by tests. Keep it until
    the live pass succeeds, then drop `questions_fts`, its triggers and tests with
    a migration; do not delete it before that proof.

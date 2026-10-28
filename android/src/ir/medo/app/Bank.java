@@ -4,8 +4,10 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -33,6 +35,14 @@ public final class Bank {
     private final Map<Integer, Question> byId = new HashMap<>();
     private final Map<Integer, Integer> positions = new HashMap<>();
     private final List<Map<String, Object>> chunkFiles = new ArrayList<>();
+    /** Light index entries, kept so an evicted chunk can be demoted again. */
+    private final Map<Integer, Question> lights = new HashMap<>();
+    private final Map<Integer, String> chunkPaths = new HashMap<>();
+    /** The last two chunk bodies in memory, oldest first (LRU of 2). */
+    private final Map<String, List<Question>> loadedChunks = new HashMap<>();
+    private final Deque<String> chunkOrder = new ArrayDeque<>();
+    private final Object loadLock = new Object();
+    private File zipFile;
     private Map<String, List<Integer>> wordIndex;
     private final Map<String, Node> byUrl = new HashMap<>();
     private final Map<Integer, Integer> perTopic = new HashMap<>();
@@ -61,13 +71,17 @@ public final class Bank {
         }
         index(roots);
         for (Object raw : MiniJson.asList(root.get("chunks"))) {
-            chunkFiles.add(MiniJson.asMap(raw));
+            Map<String, Object> chunk = MiniJson.asMap(raw);
+            chunkFiles.add(chunk);
+            chunkPaths.put(MiniJson.integer(chunk, "id", 0),
+                    MiniJson.str(chunk, "file", ""));
         }
         for (Object raw : MiniJson.asList(root.get("questions"))) {
             Question q = Question.from(MiniJson.asMap(raw));
             positions.put(q.id, questions.size());
             questions.add(q);
             byId.put(q.id, q);
+            lights.put(q.id, q);
             // A question can sit in several subtopics of the same topic; it
             // counts once per topic badge and once per subtopic badge.
             Set<Integer> seenTopics = new HashSet<>();
@@ -113,9 +127,10 @@ public final class Bank {
     }
 
     /**
-     * Zip bundle: the index first (tree, counts, light entries), then each
-     * chunk straight from the archive and into questions — one chunk in memory
-     * at a time instead of the whole file as bytes, as a String and as a tree.
+     * Zip bundle: the index only (tree, counts, light entries).  A chunk body
+     * is read the first time one of its questions is opened and only the last
+     * two chunks stay in memory, so a 20k bank starts small instead of loading
+     * every lesson up front (a 128 MB phone heap used to run out).
      */
     public static Bank parseZip(File file) throws Exception {
         ZipFile zip = new ZipFile(file);
@@ -127,34 +142,126 @@ public final class Bank {
             Map<String, Object> index = MiniJson.asMap(
                     MiniJson.parse(readEntry(zip, indexEntry)));
             Bank bank = new Bank(index);
-            for (Map<String, Object> chunk : bank.chunkFiles) {
-                String path = MiniJson.str(chunk, "file", "");
-                ZipEntry entry = path.isEmpty() ? null : zip.getEntry(path);
-                if (entry == null) {
-                    continue;          // a missing chunk loses only that category
-                }
-                Map<String, Object> body = MiniJson.asMap(
-                        MiniJson.parse(readEntry(zip, entry)));
-                bank.absorb(MiniJson.asList(body.get("questions")));
-            }
+            bank.zipFile = file;
             return bank;
         } finally {
             zip.close();
         }
     }
 
-    /** Full chunk rows replace the light index entries for the same ids. */
-    private void absorb(List<Object> rawQuestions) {
-        for (Object raw : rawQuestions) {
-            Question q = Question.from(MiniJson.asMap(raw));
-            Integer at = positions.get(q.id);
-            if (at == null) {
-                positions.put(q.id, questions.size());
-                questions.add(q);
-            } else {
-                questions.set(at, q);
+    /** The index entry for this id, never reading a chunk. */
+    public Question light(int id) {
+        Question q = lights.get(id);
+        return q != null ? q : byId.get(id);
+    }
+
+    /** True when this id's chunk body is currently in memory. */
+    public boolean isHydrated(int id) {
+        Question q = byId.get(id);
+        return q != null && q.bodyLoaded;
+    }
+
+    /**
+     * One question with its options and lesson; reads its chunk if needed.
+     *
+     * A light entry is always returned when the chunk is missing, so a damaged
+     * archive still shows stems instead of crashing.
+     */
+    public Question question(int id) {
+        Question q = byId.get(id);
+        if (q == null || q.bodyLoaded || zipFile == null) {
+            return q;
+        }
+        String path = chunkPaths.get(q.chunkId);
+        if (path == null || path.isEmpty()) {
+            return q;
+        }
+        loadChunk(path);
+        Question full = byId.get(id);
+        return full == null ? q : full;
+    }
+
+    /**
+     * Fully hydrated copies for a bulk writer (PDF).
+     *
+     * The result keeps every body alive, so this is only for a deliberate
+     * export, never for the list/quiz paths.
+     */
+    public List<Question> fullQuestions(List<Question> items) {
+        List<Question> out = new ArrayList<>(items.size());
+        for (Question q : items) {
+            Question full = question(q.id);
+            out.add(full == null ? q : full);
+        }
+        return out;
+    }
+
+    /** Read one chunk entry and promote/demote the LRU pair. */
+    private List<Question> loadChunk(String path) {
+        synchronized (loadLock) {
+            List<Question> cached = loadedChunks.get(path);
+            if (cached != null) {
+                chunkOrder.remove(path);
+                chunkOrder.addLast(path);
+                return cached;
             }
-            byId.put(q.id, q);
+            List<Question> parsed = new ArrayList<>();
+            ZipFile zip = null;
+            try {
+                zip = new ZipFile(zipFile);
+                ZipEntry entry = zip.getEntry(path);
+                if (entry == null) {
+                    return parsed;          // a missing chunk loses one category
+                }
+                Map<String, Object> body = MiniJson.asMap(
+                        MiniJson.parse(readEntry(zip, entry)));
+                for (Object raw : MiniJson.asList(body.get("questions"))) {
+                    Question q = Question.from(MiniJson.asMap(raw));
+                    parsed.add(q);
+                    Integer at = positions.get(q.id);
+                    if (at == null) {
+                        positions.put(q.id, questions.size());
+                        questions.add(q);
+                    } else {
+                        questions.set(at, q);
+                    }
+                    byId.put(q.id, q);
+                }
+            } catch (Exception ignored) {
+                // A broken chunk must not break the rest of the archive.
+            } finally {
+                if (zip != null) {
+                    try {
+                        zip.close();
+                    } catch (Exception ignored) {
+                        // nothing useful to do on close failure
+                    }
+                }
+            }
+            if (!parsed.isEmpty()) {
+                loadedChunks.put(path, parsed);
+                chunkOrder.addLast(path);
+                while (chunkOrder.size() > 2) {
+                    demote(chunkOrder.removeFirst());
+                }
+            }
+            return parsed;
+        }
+    }
+
+    /** Replace an evicted chunk's bodies with their light index entries. */
+    private void demote(String path) {
+        List<Question> old = loadedChunks.remove(path);
+        if (old == null) {
+            return;
+        }
+        for (Question q : old) {
+            Question light = lights.get(q.id);
+            Integer at = positions.get(q.id);
+            if (light != null && at != null) {
+                questions.set(at, light);
+                byId.put(q.id, light);
+            }
         }
     }
 
@@ -190,10 +297,6 @@ public final class Bank {
 
     public static void remember(Bank bank) {
         cache = bank;
-    }
-
-    public Question question(int id) {
-        return byId.get(id);
     }
 
     /** Word -> ids, built once on the first search and kept for the session. */
@@ -331,7 +434,7 @@ public final class Bank {
     public List<Question> answerable() {
         List<Question> out = new ArrayList<>();
         for (Question q : questions) {
-            if (q.options.size() >= 2) {
+            if (q.hasOptions()) {
                 out.add(q);
             }
         }

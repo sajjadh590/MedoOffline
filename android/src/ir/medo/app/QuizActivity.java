@@ -73,7 +73,7 @@ public final class QuizActivity extends Activity {
         if (!TextUtils.isEmpty(requested)) {
             title = requested;
         }
-        quiz = new Quiz(items, state);
+        quiz = new Quiz(items, state, bank);
         // A tap in the question list must land on that row, not restart the
         // section at question 1.
         quiz.goTo(getIntent().getIntExtra(EXTRA_START_INDEX, 0));
@@ -89,7 +89,8 @@ public final class QuizActivity extends Activity {
         int[] ids = getIntent().getIntArrayExtra(EXTRA_IDS);
         if (ids != null) {
             for (int id : ids) {
-                Question q = bank.question(id);
+                // Light entries only: Quiz.current() hydrates the one on screen.
+                Question q = bank.light(id);
                 if (q != null) {
                     items.add(q);
                 }
@@ -160,7 +161,7 @@ public final class QuizActivity extends Activity {
             @Override
             public void onClick(View v) {
                 PdfExporter.export(QuizActivity.this, title,
-                        new java.util.ArrayList<Question>(quiz.items()), state);
+                        new java.util.ArrayList<Question>(quiz.items()), state, bank);
             }
         });
         top.addView(pdf);

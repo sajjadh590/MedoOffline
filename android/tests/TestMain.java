@@ -525,7 +525,8 @@ public final class TestMain {
                     + "\"stats\":{\"total\":1},\"tree\":[],"
                     + "\"questions\":[{\"id\":7,\"topic_id\":5,\"tag_id\":0,"
                     + "\"nodes\":[{\"topic_id\":5,\"tag_id\":0}],"
-                    + "\"stem_text\":\"بیمار با تب\",\"correct\":2}],"
+                    + "\"stem_text\":\"بیمار با تب\",\"correct\":2,"
+                    + "\"chunk\":5,\"options_count\":2,\"has_explanation\":true}],"
                     + "\"chunks\":[{\"id\":5,\"count\":1,\"file\":\"chunks/5.json\"}]}";
             String chunk = "{\"format\":\"medo-bank\",\"version\":2,\"chunk\":5,"
                     + "\"questions\":[{\"id\":7,\"topic_id\":5,\"tag_id\":0,"
@@ -549,7 +550,9 @@ public final class TestMain {
 
             Bank bank = Bank.load(file);
             eq("zip: one question", 1, bank.size());
+            check("zip: index entry starts light", !bank.isHydrated(7));
             Question q = bank.question(7);
+            check("zip: opening one question hydrates it", bank.isHydrated(7));
             check("zip: options come from the chunk", q != null && q.options.size() == 2);
             check("zip: lesson comes from the chunk", q != null && q.hasExplanation());
             check("zip: word search", q != null && bank.searchIds("بیمار").contains(7));
@@ -561,6 +564,32 @@ public final class TestMain {
                 file.delete();
             }
         }
+    }
+
+    /** Load three chunks in turn: only the newest two may stay in memory. */
+    private static void lazyEviction(Bank bank) {
+        Map<Integer, Integer> firstOfChunk = new HashMap<>();
+        for (Question q : bank.questions) {
+            if (q.chunkId >= 0 && !firstOfChunk.containsKey(q.chunkId)) {
+                firstOfChunk.put(q.chunkId, q.id);
+            }
+        }
+        if (firstOfChunk.size() < 3) {
+            System.out.println("     (" + firstOfChunk.size()
+                    + " chunk(s): eviction needs 3, skipped)");
+            return;
+        }
+        List<Integer> chunks = new ArrayList<>(firstOfChunk.keySet());
+        int first = firstOfChunk.get(chunks.get(0));
+        int second = firstOfChunk.get(chunks.get(1));
+        int third = firstOfChunk.get(chunks.get(2));
+        bank.question(first);
+        bank.question(second);
+        bank.question(third);
+        check("LRU keeps only the newest two chunks", !bank.isHydrated(first));
+        check("the newest chunk is still hydrated", bank.isHydrated(third));
+        check("an evicted question reloads from its chunk",
+                bank.question(first) != null && bank.isHydrated(first));
     }
 
     private static void realBundle(File file) {
@@ -581,10 +610,19 @@ public final class TestMain {
             check("parse under 3s (" + parseMs + "ms)", parseMs < 3000);
             System.out.println("     parsed " + bank.size() + " questions in " + parseMs + " ms");
 
-            Question first = bank.questions.get(0);
-            check("question has options", first.options.size() >= 2);
-            check("persian stem survives", first.stemText.length() > 0);
-            check("question reachable by id", bank.question(first.id) == first);
+            Question light = bank.questions.get(0);
+            check("persian stem survives", light.stemText.length() > 0);
+            if (bank.version == 2) {
+                check("index stays light until a question opens",
+                        !bank.isHydrated(light.id));
+            }
+            Question first = bank.question(light.id);
+            check("question has options", first != null && first.options.size() >= 2);
+            check("question reachable by id", first != null && first.id == light.id);
+            if (bank.version == 2) {
+                check("opening a question hydrated its chunk", bank.isHydrated(light.id));
+                lazyEviction(bank);
+            }
             String[] words = Text.normalizeSearch(first.stemText)
                     .split("[^\\p{L}\\p{N}]+");
             if (words.length > 0 && words[0].length() > 1) {

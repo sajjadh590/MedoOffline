@@ -584,7 +584,8 @@ public final class MainActivity extends Activity {
                         } else if (action == 1) {
                             openQuiz(target);
                         } else if (action == 2) {
-                            PdfExporter.export(MainActivity.this, target.label(), questions, state);
+                            PdfExporter.export(MainActivity.this, target.label(),
+                                    questions, state, bank);
                         } else {
                             toggleNode(node, null);
                         }

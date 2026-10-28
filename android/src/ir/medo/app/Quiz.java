@@ -10,14 +10,21 @@ public final class Quiz {
 
     private final List<Question> items;
     private final StateStore state;
+    /** When set, the showing question is hydrated from its chunk on demand. */
+    private final Bank bank;
     private int index;
 
     public Quiz(List<Question> items, StateStore state) {
+        this(items, state, null);
+    }
+
+    public Quiz(List<Question> items, StateStore state, Bank bank) {
         if (items == null || items.isEmpty()) {
             throw new IllegalArgumentException("no questions");
         }
         this.items = items;
         this.state = state;
+        this.bank = bank;
     }
 
     public List<Question> items() {
@@ -25,7 +32,8 @@ public final class Quiz {
     }
 
     public Question current() {
-        return items.get(index);
+        Question q = items.get(index);
+        return bank == null ? q : bank.question(q.id);
     }
 
     public int position() {

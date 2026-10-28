@@ -282,6 +282,10 @@ def index_and_chunks(payload: dict) -> tuple[dict, dict[int, list[dict]]]:
         cid = roots.get(int(q.get("topic_id") or 0), 0)
         chunks.setdefault(cid, []).append(q)
         entry = {k: q.get(k) for k in _INDEX_FIELDS}
+        # Counts the phone needs for its list rows without reading the chunk.
+        entry["options_count"] = len(q.get("options") or [])
+        entry["has_explanation"] = bool(
+            q.get("explanation_text") or q.get("explanation_html"))
         entry["chunk"] = cid
         light.append(entry)
 

@@ -25,6 +25,10 @@ public final class Question {
      *  reachable through its topic and several «?tag=» subtopics at once; the
      *  single topicId/tagId pair above is only the first one. */
     public final List<int[]> nodes;
+    /** Zip chunk that holds this question's body (-1 for a v1 JSON bank). */
+    public final int chunkId;
+    /** False while only the light index entry is in memory. */
+    public final boolean bodyLoaded;
     public final String sourceUrl;
     public final int page;
     public final int ordinal;
@@ -44,7 +48,15 @@ public final class Question {
      *  app prints under each option. Empty when the page had no poll. */
     public final Map<Integer, Integer> votes;
 
+    private final int optionsInIndex;      // -1 = an old index without the count
+    private final boolean lessonInIndex;
+
     private Question(Map<String, Object> m) {
+        this.chunkId = MiniJson.integer(m, "chunk", -1);
+        // Chunk bodies carry stem_html; index entries deliberately do not.
+        this.bodyLoaded = m.get("stem_html") != null;
+        this.optionsInIndex = MiniJson.integer(m, "options_count", -1);
+        this.lessonInIndex = MiniJson.bool(m, "has_explanation");
         this.id = MiniJson.integer(m, "id", 0);
         this.topicId = MiniJson.integer(m, "topic_id", 0);
         this.tagId = MiniJson.integer(m, "tag_id", 0);
@@ -109,7 +121,17 @@ public final class Question {
     }
 
     public boolean hasExplanation() {
-        return !explanationText.isEmpty() || !explanationHtml.isEmpty();
+        return lessonInIndex || !explanationText.isEmpty() || !explanationHtml.isEmpty();
+    }
+
+    /** Options this question has, without reading its chunk when possible. */
+    public int optionCount() {
+        return bodyLoaded ? options.size() : optionsInIndex;
+    }
+
+    /** A quiz may show it: enough options, or an old index that cannot tell. */
+    public boolean hasOptions() {
+        return options.size() >= 2 || (!bodyLoaded && optionsInIndex < 0);
     }
 
     /** The option with the largest site poll share, or null without votes. */

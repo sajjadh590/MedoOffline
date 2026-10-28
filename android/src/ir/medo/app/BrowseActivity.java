@@ -154,7 +154,8 @@ public final class BrowseActivity extends Activity {
                     toast("سوالی در این فهرست نیست");
                     return;
                 }
-                PdfExporter.export(BrowseActivity.this, title, new ArrayList<>(rows), state);
+                PdfExporter.export(BrowseActivity.this, title,
+                        new ArrayList<>(rows), state, bank);
             }
         });
         top.addView(pdf);
@@ -452,7 +453,7 @@ public final class BrowseActivity extends Activity {
             wrap.addView(stem);
 
             TextView meta = Ui.text(BrowseActivity.this,
-                    Ui.fa(q.options.size()) + " گزینه"
+                    Ui.fa(Math.max(q.optionCount(), 0)) + " گزینه"
                             + (q.hasExplanation() ? "  ·  پاسخ تشریحی" : ""),
                     Ui.T_XS, Ui.TEXT_3);
             wrap.addView(meta);

@@ -70,6 +70,16 @@ public final class PdfExporter {
 
     public static void export(final Activity activity, final String title,
                               final List<Question> questions, final StateStore state) {
+        export(activity, title, questions, state, null);
+    }
+
+    /**
+     * Same export with a bank: the light list is hydrated inside the worker,
+     * not on the UI thread, so a whole-bank PDF does not freeze the screen.
+     */
+    public static void export(final Activity activity, final String title,
+                              final List<Question> questions, final StateStore state,
+                              final Bank bank) {
         if (questions == null || questions.isEmpty()) {
             toast(activity, "سوالی برای خروجی نیست");
             return;
@@ -85,7 +95,9 @@ public final class PdfExporter {
             @Override
             public void run() {
                 try {
-                    final Result result = write(activity, title, items, state);
+                    List<Question> full = bank == null
+                            ? items : bank.fullQuestions(items);
+                    final Result result = write(activity, title, full, state);
                     ui.post(new Runnable() {
                         @Override
                         public void run() {
