@@ -50,6 +50,7 @@ Every flag below comes from the command's own `--help`.
 | `stats` / `verify` | Counts and integrity checks | `--db` |
 | `diagnose-tags` | Stored questions without a subtopic, truncated subtopics | `--db` |
 | `diagnose-live` | One live probe: page counter, `?tag=` filtering | `--topic`, `--tag`, `--headless`, `--state` |
+| `live-report` | One pasteable status summary (counts only, no lesson text) | `--db`, `--log`, `--network/--no-network` |
 | `check-site-ids` | Fail loudly if the site stops exposing its question id | `--topic`, `--tag`, `--headless`, `--state` |
 | `import-fixtures` | Import synthetic/captured MHTML into a test DB | `--db` |
 | `keystore-backup` | Zip the Android signing key + its SHA-256 into `dist/` | `--keystore`, `--output` |
@@ -177,9 +178,10 @@ tests/               pytest suite + shared fixtures
 
 Read [`AGENTS.md`](AGENTS.md) before changing code (smallest complete change,
 stdlib first, Persian UI), [`PROMPT.md`](PROMPT.md) for the full project brief
-and every bug fixed so far, [`NOTES.md`](NOTES.md) for the chronological
-evidence, and [`HANDOFF.md`](HANDOFF.md) for the latest change report (phases
-0–6) with verification results and open work.
+and every bug fixed so far, [`NOTES.md`](NOTES.md) for current architecture,
+site facts and open work, [`docs/history.md`](docs/history.md) for the
+chronological evidence, and [`HANDOFF.md`](HANDOFF.md) for the phase 0–6 change
+report with verification results.
 
 ## آزمون‌ها
 

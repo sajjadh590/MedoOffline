@@ -5,8 +5,10 @@
 > exists* (desktop + Android), *what the current state is*, and — most importantly —
 > *every significant bug we hit, how we fixed it, and which attempted fixes did NOT work*
 > so you do not repeat dead ends. Read it before writing any code.
-> Companion files: [`NOTES.md`](NOTES.md) = the long chronological decision log (read it
-> when you need evidence), [`AGENTS.md`](AGENTS.md) = the coding philosophy this repo
+> Companion files: [`NOTES.md`](NOTES.md) = current architecture, site facts, live-test
+> status and open work (read it first), [`docs/history.md`](docs/history.md) = the long
+> chronological decision log (evidence for why a past choice was made),
+> [`AGENTS.md`](AGENTS.md) = the coding philosophy this repo
 > follows (smallest complete change, lazy senior dev), [`docs/design-contract.md`](docs/design-contract.md)
 > = UI/UX rules.
 
@@ -60,7 +62,8 @@ Project root: `E:\MedoOffline` (Windows, Git Bash available).
 ```
 E:\MedoOffline\
 ├── PROMPT.md              # this file
-├── NOTES.md               # chronological decision log (the "why" archive)
+├── NOTES.md               # current state: architecture, site facts, open work
+├── docs/history.md        # chronological decision log (the "why" archive)
 ├── AGENTS.md              # coding philosophy for agents working here
 ├── docs/design-contract.md
 ├── launcher.py            # starts server + opens browser (desktop shortcut target)
@@ -418,6 +421,24 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
   the old single-JSON file still loads. The phone also has a word index for search, and
   `build-bank` can ship selected categories or embed WebP mind-maps.
 
+**What the next batch (phase 7) changed**
+- `medo/backup.py`: one SQLite copy per process to `data/backups/` (newest five)
+  before a repair, tag sync or backfill can rewrite rows.
+- Repair safety: a stored FULL explanation is never replaced by an empty, locked,
+  unknown or `< 40%` shorter one (`[audit] kept old explanation`); a page matched
+  by site id refreshes stem/options display text without touching identity/hash.
+- `scripts/backfill_tags.py --site-ids` resolves ambiguous option signatures with
+  the stored `(topic_id, source_page)` and reports filled/ambiguous/skipped.
+- `medo live-report`: one pasteable summary from counts + `logs/medo.log`, no
+  lesson text (doctor verdict, page drift, subtopic coverage, node/site-id
+  totals, repair queue, 429s, current delay range).
+- `scripts/dev/audit_push.py` fails on tracked sessions, databases, captures,
+  `data/`-like paths, files > 1 MB, long Persian prose, or text copied from
+  `data/diag/`; `scripts/dev/clean_clone_test.py` runs it plus pytest on an
+  export of HEAD.
+- Docs: this brief's companion log moved to `docs/history.md`; `NOTES.md` is now
+  the concise current-state page.
+
 **Known-open (do not claim these are done)**
 1. **Live verification against medofast.ir is still blocked on this machine** — no real
    login, no live scrape, no live repair, no live tag sync in these sessions. Everything
@@ -425,13 +446,14 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
 2. **The `.medo` zip loads its chunks eagerly (streamed one at a time), not lazily with an
    LRU of 2.** The memory problem that mattered was the three copies of the whole file
    (`byte[]` → `String` → tree); this removes them while staying with an immutable
-   `Question`. A lazy per-chunk cache is the next step if a bank grows past the phone's RAM.
+   `Question`. A synthetic 20k bank + a device heap measurement decides whether the lazy
+   per-chunk cache is actually needed.
 3. **QR scanner and phone PDF have never been run on a real device** — only JVM tests and
    compilation.
 4. `Image` transfer to the phone is opt-in (`build-bank --images`); the default bank is
    text-only, which is why it stays small.
-5. FTS5 is now used only by tests; the browser searches its own normalized index. Either
-   wire it to a server-side search or delete the table (see PROMPT §11).
+5. FTS5 is now used only by tests; the browser searches its own normalized index. It is
+   kept until the live pass succeeds, then dropped with a migration (see PROMPT §11).
 6. `data/storage_state.json` may be anonymous — one real «ورود با مرورگر» unlocks
    explanations and the daily quota.
 
@@ -441,14 +463,17 @@ bash android/test.sh    # JVM logic tests, currently "ALL PASSED (116 checks)"
 
 ```bash
 # Python env
-./.venv/Scripts/python -m pytest -q          # full suite (expect 285 passed)
+./.venv/Scripts/python -m pytest -q          # full suite
 ./.venv/Scripts/python -m compileall medo    # syntax
 node --check medo/web/app.js                 # JS syntax
-node --check medo/web/normalize.js
+./.venv/Scripts/python scripts/dev/clean_clone_test.py   # archive HEAD, audit, pytest
+./.venv/Scripts/python scripts/dev/audit_push.py         # never commit private content
 
 # Desktop app
 ./.venv/Scripts/python launcher.py           # server + browser (or the desktop shortcut)
 ./.venv/Scripts/python -m medo.cli doctor     # Persian verdict before any download
+./.venv/Scripts/python -m medo.cli live-report --no-network   # pasteable status summary
+./.venv/Scripts/python -m medo.cli diagnose-tags               # stored vs declared
 ./.venv/Scripts/python -m medo.cli serve --port 8099
 ./.venv/Scripts/python -m medo.cli discover  # hierarchy crawl (needs internet)
 ./.venv/Scripts/python -m medo.cli build-web | build-pdf | build-bank | share
@@ -472,7 +497,8 @@ adb reverse tcp:8765 tcp:8765   # for USB
 
 ## 10. Suggested first steps for a new agent
 
-1. Read `AGENTS.md` (coding rules), then `NOTES.md` tail for the last session's evidence.
+1. Read `AGENTS.md` (coding rules), then `NOTES.md` (current state, site facts, open
+   work); use `docs/history.md` only when you need the evidence behind a past decision.
 2. Run `pytest -q` and `android/test.sh` to establish the baseline before touching anything.
 3. When a feature "does not work", **read `logs/medo.log` first** — nearly every bug in §7
    was identified from a log line, not from guessing (429 statuses, `[diag] http=…`,
@@ -502,6 +528,9 @@ change one of these areas; each line was verified by the check named at the end.
 | Light API + paging | `medo/db.py` (`get_questions_light`), `medo/server.py`, `medo/web/app.js` | `tests/test_server_api.py` |
 | Phone bank v2 | `medo/share.py`, `medo/cli.py`, `android/.../Bank.java`, `android/.../BankStore.java` | `tests/test_android_bundle.py`, `android/test.sh` |
 | Build hygiene | `.gitignore`, `android/build.sh`, `android/AndroidManifest.xml`, `medo/cli.py` (`keystore-backup`) | `tests/test_android_bundle.py`, `tests/test_cli_app.py` |
+| Repair safety + backup | `medo/backup.py`, `medo/answer_audit.py`, `medo/server.py`, `scripts/backfill_tags.py` | `tests/test_answer_audit.py`, `tests/test_backfill_tags.py` |
+| One pasteable live report | `medo/live_report.py`, `medo/cli.py` (`live-report`) | `tests/test_live_report.py` |
+| Push audit + clean clone | `scripts/dev/audit_push.py`, `scripts/dev/clean_clone_test.py` | `tests/test_audit_push.py`, the clean-clone run itself |
 
 **Known-open work, in the order it should be done**
 
@@ -509,14 +538,13 @@ change one of these areas; each line was verified by the check named at the end.
    routed direct (`domain:medofast.ir`, `geosite:ir`), run `medo doctor --deep`,
    then one small scrape, then `diagnose-tags` and one repair run. Record the
    output in `NOTES.md`; until then do not claim those paths work live.
-2. **Lazy phone chunks.** The zip already loads one chunk at a time, but all
-   questions end up in memory after load. If a real bank gets too large, make
-   `Bank` hydrate a chunk on `question(id)`/`forNode(node)` and keep an LRU of 2,
-   replacing the immutable `Question` entries in place (the map already exists:
-   `positions`).
-3. **FTS5 decision.** It is now only exercised by tests. Either wire
-   `/api/questions?q=` to FTS5 with a quoted-token query builder, or drop
-   `questions_fts` and its triggers and delete `search_questions` + its tests.
+2. **Synthetic stress test.** Build 20,000 fake questions with
+   `scripts/dev/make_big_bank.py`, then measure web load/search and Android load
+   + peak heap. Add lazy phone chunks (LRU 2, hydrating `question(id)` /
+   `forNode(node)` from `positions`) only if a device exceeds a safe heap.
+3. **FTS5 removal (deferred).** It is now only exercised by tests. Keep it until
+   the live pass succeeds, then drop `questions_fts`, its triggers and tests with
+   a migration; do not delete it before that proof.
 4. **Device test.** Install the fresh `dist/medo.apk` and a zip bank on the
    phone: QR import, browse, quiz, PDF export, word search.
 5. **Images to phone.** `build-bank --images` inlines WebP data URIs. Verify on a
