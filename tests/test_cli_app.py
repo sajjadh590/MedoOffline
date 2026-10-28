@@ -12,7 +12,7 @@ runner = CliRunner()
 ALL_COMMANDS = [
     "login", "scrape", "discover", "serve",
     "build-pdf", "export-pdf", "build-web", "export-web",
-    "stats", "verify", "import-fixtures",
+    "stats", "verify", "import-fixtures", "doctor", "keystore-backup",
 ]
 
 
@@ -39,3 +39,23 @@ def test_scrape_requires_target(tmp_path):
     result = runner.invoke(app, ["scrape", "--db", str(tmp_path / "t.db")])
     assert result.exit_code == 1
     assert "--topic" in result.output
+
+
+def test_keystore_backup_keeps_the_key_and_its_digest(tmp_path):
+    """Without this key an installed app can never be updated, only replaced."""
+    import hashlib
+    import zipfile
+
+    key = tmp_path / "medo-debug.keystore"
+    key.write_bytes(b"fake-key-bytes")
+    out = tmp_path / "backup"
+    result = runner.invoke(app, ["keystore-backup", "--keystore", str(key),
+                                 "--output", str(out)])
+    assert result.exit_code == 0, result.output
+
+    zips = list(out.glob("*.zip"))
+    assert len(zips) == 1
+    with zipfile.ZipFile(zips[0]) as zf:
+        assert zf.read("medo-debug.keystore") == b"fake-key-bytes"
+        assert zf.read("SHA-256.txt").decode().strip() == \
+            hashlib.sha256(b"fake-key-bytes").hexdigest()

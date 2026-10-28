@@ -596,5 +596,39 @@ def import_fixtures_cmd(
     console.print(f"[bold green][+] Imported {imported} fixtures into {db_path}[/bold green]")
 
 
+@app.command(name="keystore-backup")
+def keystore_backup(
+    keystore: Path = typer.Option(
+        PROJECT_ROOT / "android" / "medo-debug.keystore",
+        "--keystore", help="Android signing key to back up"),
+    output_dir: Path = typer.Option(
+        DIST_DIR / "keystore-backup", "--output",
+        help="Folder that receives the zip (dist/ is git-ignored)"),
+):
+    """Zip the Android signing key with its SHA-256 so a lost PC cannot break updates."""
+    import hashlib
+    import time
+    import zipfile
+
+    if not keystore.is_file():
+        console.print(f"[bold red][!] کلید امضا پیدا نشد: {keystore}[/bold red]")
+        raise typer.Exit(code=1)
+
+    blob = keystore.read_bytes()
+    digest = hashlib.sha256(blob).hexdigest()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M")
+    target = output_dir / f"medo-debug-keystore-{stamp}.zip"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("medo-debug.keystore", blob)
+        zf.writestr("SHA-256.txt", digest + "\n")
+
+    console.print(f"[bold green][+] پشتیبان ساخته شد: {target}[/bold green]")
+    console.print(f"    SHA-256: {digest}")
+    console.print("[yellow]این فایل را از این رایانه بیرون ببر (فلش/درایو شخصی). "
+                  "بدون همین کلید، نسخهٔ بعدی برنامه روی گوشی به‌روزرسانی "
+                  "نمی‌شود.[/yellow]")
+
+
 if __name__ == "__main__":
     app()

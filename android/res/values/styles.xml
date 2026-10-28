@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark, low-glare palette that matches the web UI (see Ui.java). -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E1116</item>
+        <item name="android:statusBarColor">#0E1116</item>
+        <item name="android:navigationBarColor">#0E1116</item>
+        <item name="android:colorPrimary">#2DD4A7</item>
+        <item name="android:colorPrimaryDark">#0E1116</item>
+        <item name="android:colorAccent">#2DD4A7</item>
+        <item name="android:textColorPrimary">#E6EDF3</item>
+        <item name="android:textColorSecondary">#93A1AF</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

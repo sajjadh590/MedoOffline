@@ -1,0 +1,11 @@
+[
+  {"input": "می‌شود", "expected": "میشود", "why": "ZWNJ is not part of a match"},
+  {"input": "كتاب", "expected": "کتاب", "why": "Arabic kaf -> Persian kaf"},
+  {"input": "على", "expected": "علی", "why": "Arabic yeh / alef maqsura -> Persian yeh"},
+  {"input": "سؤال ۱۲۳", "expected": "سؤال 123", "why": "Persian digits -> ASCII"},
+  {"input": "سؤال ١٢٣", "expected": "سؤال 123", "why": "Arabic-Indic digits -> ASCII"},
+  {"input": "Procalcitonin\u200b\uFE0F", "expected": "procalcitonin", "why": "site-injected invisibles + case"},
+  {"input": "  چند   خط\nمتن ", "expected": "چند خط متن", "why": "whitespace collapses"},
+  {"input": "ABC", "expected": "abc", "why": "Latin case folds"},
+  {"input": "پروگنوز", "expected": "پروگنوز", "why": "a word containing «پرو» is still itself"}
+]

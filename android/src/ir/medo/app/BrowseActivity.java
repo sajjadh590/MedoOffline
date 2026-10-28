@@ -352,15 +352,7 @@ public final class BrowseActivity extends Activity {
         for (Question.Option o : q.options) {
             hay.append(' ').append(o.text);
         }
-        return normalize(hay.toString()).contains(normalize(query));
-    }
-
-    private static String normalize(String value) {
-        return value.toLowerCase(Locale.ROOT)
-                .replace('\u064A', '\u06CC')
-                .replace('\u0643', '\u06A9')
-                .replace("\u200C", "")
-                .replace("\u0640", "");
+        return Text.normalizeSearch(hay.toString()).contains(Text.normalizeSearch(query));
     }
 
     private void startQuiz(int startIndex) {

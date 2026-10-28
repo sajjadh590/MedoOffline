@@ -72,6 +72,26 @@ def normalize_single_line(text: str) -> str:
     return re.sub(r"\s+", " ", normalize_text(text)).strip()
 
 
+# Persian and Arabic-Indic digits, in the order of their ASCII equivalents.
+_DIGIT_MAP = str.maketrans(
+    "\u06f0\u06f1\u06f2\u06f3\u06f4\u06f5\u06f6\u06f7\u06f8\u06f9"
+    "\u0660\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668\u0669",
+    "0123456789" * 2,
+)
+
+
+def normalize_search_text(text: str) -> str:
+    """One canonical form for searching — shared by Python, the web UI and Android.
+
+    Arabic glyphs become Persian, ZWNJ and invisible code points disappear,
+    Persian/Arabic digits become ASCII, whitespace collapses and case is
+    folded.  The same rules live in ``medo/web/normalize.js`` and
+    ``android/src/ir/medo/app/Text.java``; ``tests/search_vectors.json`` is the
+    contract all three are tested against.
+    """
+    return normalize_single_line(text or "").translate(_DIGIT_MAP).lower()
+
+
 def content_hash_input(stem: str, options: list[str]) -> str:
     """Return a canonical string for hashing stem+options for deduplication."""
     opts_str = "|".join(normalize_single_line(o) for o in options)

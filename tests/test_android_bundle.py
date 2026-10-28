@@ -287,3 +287,19 @@ def test_phone_is_pointed_at_a_real_lan_address():
         key=share._rank,
     ) == ["192.168.1.5", "10.67.195.246", "172.18.0.1", "169.254.3.4"]
     assert share._rank("not-an-address") == 3
+
+
+def test_android_sources_are_tracked_so_a_clean_clone_can_build():
+    """The manifest and res/ are source: `.gitignore`'s old `*.xml` hid them."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    if not shutil.which("git") or not (root / ".git").exists():
+        pytest.skip("not a git checkout")
+    listed = subprocess.run(["git", "ls-files", "android"], cwd=root,
+                            capture_output=True, text=True, check=True).stdout
+    files = set(listed.splitlines())
+    assert "android/AndroidManifest.xml" in files
+    assert "android/res/values/styles.xml" in files

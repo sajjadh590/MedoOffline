@@ -37,14 +37,23 @@ export PATH="$JDK/bin:$PATH"
 rm -rf "$BUILD"
 mkdir -p "$BUILD/res" "$BUILD/classes" "$BUILD/dex" "$OUT"
 
-echo "[1/6] compiling resources (aapt2)"
+# The manifest is the only place the version lives: hardcoding 1.0 here made
+# every build ship code 1, which Android refuses to install over a newer one.
+CODE=$(grep -o 'android:versionCode="[0-9]*"' "$HERE/AndroidManifest.xml" | head -1 | grep -o '[0-9]*')
+NAME=$(grep -o 'android:versionName="[^"]*"' "$HERE/AndroidManifest.xml" | head -1 | sed 's/.*="//;s/"$//')
+if [ -z "$CODE" ] || [ -z "$NAME" ]; then
+    echo "[!] android:versionCode/versionName در AndroidManifest.xml پیدا نشد."
+    exit 1
+fi
+
+echo "[1/6] compiling resources (aapt2) — version $NAME ($CODE)"
 "$BT/aapt2.exe" compile --dir "$HERE/res" -o "$BUILD/res.zip"
 "$BT/aapt2.exe" link \
     -o "$BUILD/base.apk" \
     -I "$(win "$ANDROID_JAR")" \
     --manifest "$(win "$HERE/AndroidManifest.xml")" \
     --min-sdk-version 21 --target-sdk-version 30 \
-    --version-code 1 --version-name 1.0 \
+    --version-code "$CODE" --version-name "$NAME" \
     "$BUILD/res.zip"
 
 echo "[2/6] compiling java (javac)"
@@ -81,10 +90,12 @@ PY
 
 echo "[5/6] aligning + signing"
 if [ ! -f "$KEYSTORE" ]; then
-    keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
-        -alias medo -keyalg RSA -keysize 2048 -validity 10000 \
-        -dname "CN=Medo Offline, O=Medo, C=IR" >/dev/null 2>&1
-    echo "      created $KEYSTORE (debug key — keep it to ship updates)"
+    # A new key would install beside the old app instead of updating it (and
+    # the user's progress file stays behind the old package signature).
+    echo "[!] کلید امضا پیدا نشد: android/medo-debug.keystore"
+    echo "    بدون همین کلید، نسخهٔ جدید روی گوشی به‌روزرسانی نمی‌شود."
+    echo "    پشتیبانش را برگردان (medo keystore-backup) یا از رایانهٔ دیگری کپی کن."
+    exit 1
 fi
 "$BT/zipalign.exe" -f 4 "$BUILD/unsigned.apk" "$BUILD/aligned.apk"
 "$BT/apksigner.bat" sign \
@@ -95,6 +106,23 @@ fi
 echo "[6/6] verifying"
 "$BT/apksigner.bat" verify --print-certs "$OUT/medo.apk" | head -3
 "$BT/aapt2.exe" dump badging "$OUT/medo.apk" | grep -E "^(package|sdkVersion|targetSdkVersion|application-label|launchable-activity)" || true
+
+# Bump the manifest only after the APK really exists: a failed build must not
+# skip a version number (Android refuses to install a same-or-lower code).
+python - "$HERE/AndroidManifest.xml" "$CODE" <<'PY'
+import re
+import sys
+
+path, code = sys.argv[1], int(sys.argv[2])
+# Bytes in, bytes out: rewriting in text mode changed the file's CRLF line
+# endings, so every build looked like a whole-file edit in git.
+raw = open(path, "rb").read().decode("utf-8")
+new = re.sub(r'android:versionCode="\d+"',
+             'android:versionCode="%d"' % (code + 1),
+             raw, count=1)
+open(path, "wb").write(new.encode("utf-8"))
+print("      next build will be versionCode %d" % (code + 1))
+PY
 
 SIZE=$(stat -c %s "$OUT/medo.apk")
 echo

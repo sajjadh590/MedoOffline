@@ -398,9 +398,9 @@ public final class MainActivity extends Activity {
             } else {
                 List<Node> all = new ArrayList<>();
                 Bank.flattenAll(bank.roots, all);
-                String needle = normalize(query);
+                String needle = Text.normalizeSearch(query);
                 for (Node n : all) {
-                    if (normalize(n.label()).contains(needle)) {
+                    if (Text.normalizeSearch(n.label()).contains(needle)) {
                         rows.add(n);
                     }
                 }
@@ -409,14 +409,6 @@ public final class MainActivity extends Activity {
         if (adapter != null) {
             adapter.notifyDataSetChanged();
         }
-    }
-
-    private static String normalize(String value) {
-        return value.toLowerCase(Locale.ROOT)
-                .replace('\u064A', '\u06CC')     // Arabic yeh -> Persian yeh
-                .replace('\u0643', '\u06A9')     // Arabic kaf -> Persian kaf
-                .replace("\u200C", "")           // ZWNJ
-                .replace("\u0640", "");          // tatweel
     }
 
     private int[] progress() {

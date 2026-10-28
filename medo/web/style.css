@@ -695,6 +695,61 @@ body {
   color: var(--text-main);
 }
 
+/* A Pro lesson is a small document, not one paragraph: the site's blocks are
+   headings, lists and quotes.  Without these rules a lesson read as a wall of
+   identical lines. */
+.explanation-body h4,
+.explanation-body h5,
+.explanation-body h6 {
+  font-size: 1.02rem;
+  font-weight: 700;
+  color: var(--accent-teal);
+  margin: 20px 0 8px;
+  padding-inline-start: 10px;
+  border-inline-start: 3px solid var(--accent-teal);
+}
+
+.explanation-body ul,
+.explanation-body ol {
+  margin: 8px 0 16px;
+  padding-inline-start: 26px;
+}
+
+.explanation-body li {
+  margin: 5px 0;
+}
+
+.explanation-body li::marker {
+  color: var(--accent-teal);
+}
+
+.explanation-body mark {
+  background: rgba(255, 193, 7, 0.32);
+  color: inherit;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.explanation-body blockquote {
+  margin: 12px 0;
+  padding: 10px 14px;
+  border-inline-start: 3px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.025);
+  border-radius: 8px;
+}
+
+/* «تایید گزینه ۳» is the site's own key marker inside the lesson text. */
+.answer-key-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(25, 135, 84, 0.12);
+  color: var(--accent-teal);
+  font-weight: 700;
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
 .explanation-body img {
   max-width: 100%;
   border-radius: 12px;

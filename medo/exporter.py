@@ -77,7 +77,7 @@ def export_web_bundle(
     (out_dir / "categories.json").write_text(tree_json, encoding="utf-8")
 
     # 3. Copy web assets (HTML, CSS, JS, PWA files)
-    for fname in ("style.css", "app.js", "manifest.json", "sw.js"):
+    for fname in ("style.css", "app.js", "normalize.js", "manifest.json", "sw.js"):
         src = WEB_DIR / fname
         if src.is_file():
             shutil.copy2(src, out_dir / fname)

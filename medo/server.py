@@ -26,6 +26,7 @@ from medo.db import (
     get_connection,
     get_database_stats,
     get_question_by_id,
+    get_questions_light,
     clear_run_request,
     count_needing_repair,
     count_node_questions,
@@ -1357,10 +1358,42 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
                 return
 
         if parsed.path == "/api/questions":
+            # Light rows + paging: the UI renders one question at a time and
+            # fetches the full body from /api/question/<id> when it needs it.
+            params = dict(
+                part.split("=", 1)
+                for part in (parsed.query.split("&") if parsed.query else [])
+                if "=" in part
+            )
+            try:
+                offset = max(0, int(params.get("offset") or 0))
+                limit = int(params.get("limit") or 0) or None
+            except ValueError:
+                self._send_json({"ok": False, "message": "پارامتر صفحه نامعتبر است."})
+                return
             conn = get_connection(self.db_path)
-            questions = get_all_questions(conn)
-            conn.close()
+            try:
+                questions = get_questions_light(conn, offset, limit)
+            finally:
+                conn.close()
             self._send_json(questions)
+            return
+
+        if parsed.path.startswith("/api/question/"):
+            try:
+                qid = int(parsed.path.rsplit("/", 1)[1])
+            except ValueError:
+                self._send_json({"ok": False, "message": "شناسه سوال نامعتبر است."})
+                return
+            conn = get_connection(self.db_path)
+            try:
+                question = get_question_by_id(conn, qid)
+            finally:
+                conn.close()
+            if not question:
+                self._send_json({"ok": False, "message": "سوال پیدا نشد."})
+                return
+            self._send_json(question)
             return
 
         if parsed.path == "/api/stats":

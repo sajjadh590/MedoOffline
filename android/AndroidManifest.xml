@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MedoOffline for Android.
+  Two activities, no AndroidX: the whole APK is built by android/build.sh with
+  aapt2 + javac + d8 + apksigner (see NOTES.md).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ir.medo.app"
+    android:versionCode="2"
+    android:versionName="1.2">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30" />
+
+    <!-- Only used to download the bank/update from the PC on the same Wi-Fi or USB. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- QR import: the camera is optional, the manual address still works. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <!-- Installing the APK the share server hands back after scanning its QR. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_medo"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ScanActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/AppTheme"
+            android:screenOrientation="portrait" />
+
+        <!-- Read-only provider for the generated PDF and the downloaded APK. -->
+        <provider
+            android:name=".SharedFileProvider"
+            android:authorities="ir.medo.app.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <activity
+            android:name=".BrowseActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:parentActivityName=".MainActivity"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".QuizActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:parentActivityName=".BrowseActivity"
+            android:windowSoftInputMode="stateAlwaysHidden" />
+    </application>
+</manifest>

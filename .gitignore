@@ -7,6 +7,7 @@ storage_state.json
 *.storage_state.json
 
 # ---- CRITICAL: saved site pages (scraped content) ----
+data/diag/
 tests/fixtures/*.mhtml
 tests/fixtures/*.mht
 tests/fixtures/*.html
@@ -31,12 +32,15 @@ pip-wheel-metadata/
 
 # ---- local logs (timestamped activity log) ----
 logs/
+*.log
 
 # ---- pytest / coverage ----
 .pytest_cache/
 .coverage
 htmlcov/
-*.xml
+/coverage.xml
+# (AndroidManifest.xml and android/res/*.xml are source, not build output:
+#  a blanket *.xml rule kept Android unbuildable from a clean clone.)
 
 # ---- IDE ----
 .vscode/

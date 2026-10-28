@@ -48,6 +48,17 @@
     treeMode: localStorage.getItem('medo_tree_mode') || 'mine',
     downloading: false,
     usage: null,        // last /api/scrape/status .usage (measured traffic)
+    // One folded haystack per question, built once at load (see
+    // normalizeSearch): searching used to re-lowercase every lesson on every
+    // keystroke and still missed Arabic spellings and Persian digits.
+    searchIndex: new Map(),
+  };
+
+  // The shared canonical form (medo/web/normalize.js, matched by Python and
+  // Android).  Falls back to a plain lowercase when the file is missing, e.g.
+  // in a very old exported bundle.
+  const normalizeSearch = window.medoNormalizeSearch || function (value) {
+    return String(value === null || value === undefined ? '' : value).toLowerCase();
   };
 
   // --- DOM Elements ---
@@ -621,6 +632,25 @@
     } catch (e) {}
   }
 
+  // 400 rows per request: big enough to keep the first paint quick, small
+  // enough that a huge Pro bank (long lesson text) never arrives as one blob.
+  const QUESTION_PAGE_SIZE = 400;
+
+  async function fetchQuestionPages() {
+    const all = [];
+    for (let offset = 0; offset < 500000; offset += QUESTION_PAGE_SIZE) {
+      const resp = await fetch(
+        `/api/questions?offset=${offset}&limit=${QUESTION_PAGE_SIZE}`,
+        { cache: 'no-store' });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      if (!Array.isArray(data)) return null;
+      for (const item of data) all.push(item);
+      if (data.length < QUESTION_PAGE_SIZE) break;
+    }
+    return all;
+  }
+
   async function loadQuestions() {
     let fetchFailed = false;
     let archiveResponded = false;
@@ -630,26 +660,35 @@
       // Under the local server the live archive is the source of truth; the
       // static bundle file is only the fallback for a plain file:// open.
       const served = location.protocol === 'http:' || location.protocol === 'https:';
-      const sources = served ? ['/api/questions', 'questions.json']
-                             : ['questions.json', '/api/questions'];
-      for (const src of sources) {
-        try {
-          const resp = await fetch(src, { cache: 'no-store' });
-          if (!resp.ok) {
-            fetchFailed = true;
-            continue;
-          }
-          const data = await resp.json();
-          if (Array.isArray(data)) {
-            // An empty array is a real answer ("archive is empty"), not a
-            // failed request — the two states need different advice.
-            archiveResponded = true;
-            state.questions = data;
-            break;
-          }
-        } catch (err) {
+      if (served) {
+        const paged = await fetchQuestionPages().catch(() => null);
+        if (paged) {
+          archiveResponded = true;
+          state.questions = paged;
+        } else {
           fetchFailed = true;
-          /* try the next source */
+        }
+      }
+      if (!state.questions || state.questions.length === 0) {
+        for (const src of ['questions.json']) {
+          try {
+            const resp = await fetch(src, { cache: 'no-store' });
+            if (!resp.ok) {
+              fetchFailed = true;
+              continue;
+            }
+            const data = await resp.json();
+            if (Array.isArray(data)) {
+              // An empty array is a real answer ("archive is empty"), not a
+              // failed request — the two states need different advice.
+              archiveResponded = true;
+              state.questions = data;
+              break;
+            }
+          } catch (err) {
+            fetchFailed = true;
+            /* try the next source */
+          }
         }
       }
     }
@@ -666,6 +705,7 @@
     // reports). localStorage is the freshest copy, so it wins per question and
     // the archive only fills what this browser has never seen.
     seedProgressFromArchive();
+    buildSearchIndex();
 
     applyFilter();
     renderCurrentQuestion();
@@ -695,8 +735,47 @@
     return nodes.some(n => f.ids.has(Number(n.topic_id)));
   }
 
+  /** Fold every question's searchable text once, not on every keystroke. */
+  function buildSearchIndex() {
+    state.searchIndex = new Map();
+    state.questions.forEach((item, idx) => {
+      const parts = [item.stem_text || '', item.path || '', item.explanation_text || ''];
+      (item.options || []).forEach(opt => parts.push(opt.text || ''));
+      state.searchIndex.set(idx, normalizeSearch(parts.join(' ')));
+    });
+  }
+
+  /** Wrap the site's «تایید گزینه N» marker so it reads as a key badge. */
+  function decorateLessonHtml(html) {
+    return String(html || '').replace(
+      /(تایید|تأیید)\s*گزینه\s*([0-9۰-۹]+)/g,
+      '<span class="answer-key-badge">$&</span>');
+  }
+
+  /** The list endpoint sends no lesson HTML; fetch the full row on demand. */
+  async function ensureFullQuestion(item) {
+    if (!item || item.__full || item.__loading || !item.id) return;
+    const served = location.protocol === 'http:' || location.protocol === 'https:';
+    if (!served) return;
+    item.__loading = true;
+    try {
+      const resp = await fetch('/api/question/' + item.id, { cache: 'no-store' });
+      if (!resp.ok) return;
+      const full = await resp.json();
+      if (!full || full.ok === false) return;
+      Object.assign(item, full);
+      item.__full = true;
+      const idx = state.filteredIndices[state.currentIndex];
+      if (state.questions[idx] === item) renderCurrentQuestion();
+    } catch (e) {
+      /* offline: the plain explanation_text is already on screen */
+    } finally {
+      item.__loading = false;
+    }
+  }
+
   function applyFilter() {
-    const q = state.searchQuery.trim().toLowerCase();
+    const q = normalizeSearch(state.searchQuery);
     state.filteredIndices = state.questions.map((item, idx) => idx).filter(idx => {
       const item = state.questions[idx];
       const qid = item.id || idx;
@@ -708,11 +787,8 @@
       // Tree filter: one topic, one subtopic, or every topic under a category
       if (state.treeFilter && !inTreeNode(item, state.treeFilter)) return false;
 
-      // Search query
-      if (q) {
-        const text = (item.stem_text || '') + ' ' + (item.explanation_text || '') + ' ' + (item.options || []).map(o => o.text).join(' ');
-        if (!text.toLowerCase().includes(q)) return false;
-      }
+      // Search query: one pre-folded haystack per question.
+      if (q && !(state.searchIndex.get(idx) || '').includes(q)) return false;
 
       return true;
     });
@@ -901,7 +977,11 @@
     } else if (answeredOption && (q.explanation_html || q.explanation_text)) {
       elements.explanationBox.style.display = 'block';
       elements.explanationBox.classList.remove('collapsed');
-      elements.explanationContent.innerHTML = q.explanation_html || `<p>${q.explanation_text}</p>`;
+      elements.explanationContent.innerHTML = decorateLessonHtml(
+        q.explanation_html || `<p>${q.explanation_text}</p>`);
+      // The light list carries no lesson HTML: fetch the full page once, then
+      // re-render it as the stored textbook markup.
+      if (!q.explanation_html) ensureFullQuestion(q);
 
       // Add image lightbox triggers
       elements.explanationContent.querySelectorAll('img').forEach(img => {
@@ -2444,11 +2524,17 @@
     });
 
     // Search
+    let searchTimer = null;
     elements.searchInput.addEventListener('input', (e) => {
       state.searchQuery = e.target.value;
       elements.clearSearchBtn.hidden = !state.searchQuery;
-      applyFilter();
-      renderCurrentQuestion();
+      // 200 ms: long enough that a Persian word is typed once, short enough
+      // that the result feels immediate on a large bank.
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        applyFilter();
+        renderCurrentQuestion();
+      }, 200);
     });
 
     elements.clearSearchBtn.addEventListener('click', () => {

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import re
 from pathlib import Path
 from typing import Optional
 from jinja2 import Environment, FileSystemLoader
@@ -128,6 +129,16 @@ def render_book_html(
         loader=FileSystemLoader(str(TEMPLATES_DIR)),
         autoescape=True,
     )
+
+    def key_badge(html: str) -> str:
+        """Wrap the site's «تایید گزینه N» marker as a printed key badge."""
+        return re.sub(
+            r"(تایید|تأیید)\s*گزینه\s*([0-9۰-۹]+)",
+            r'<span class="answer-key-badge">\g<0></span>',
+            str(html or ""),
+        )
+
+    env.filters["key_badge"] = key_badge
     template = env.get_template("book.html")
 
     sections: list[dict] = []

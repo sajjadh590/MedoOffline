@@ -453,3 +453,34 @@ def test_pdf_build_is_local_and_takes_the_job_slot(monkeypatch, tmp_path):
     controller.thread.join(timeout=5)
     assert controller.status == "completed"
     assert controller.is_running is False
+
+
+def test_questions_are_paged_and_the_body_is_fetched_on_demand(live_server):
+    """The list is light; a Pro lesson's HTML only comes from /api/question/<id>."""
+    port, db = live_server
+    conn = get_connection(db)
+    for i in range(3):
+        conn.execute(
+            "INSERT INTO questions (topic_id, source_url, source_page, ordinal, "
+            "content_hash, stem_html, stem_text, options_json, answer_source, "
+            "explanation_html, explanation_text, explanation_status) VALUES "
+            "(79, 'u', 1, ?, ?, '<p>stem</p>', ?, '[]', 'unknown', "
+            "'<p>lesson</p>', 'درس', 'full')",
+            (i + 1, f"h{i}", f"سوال {i}"),
+        )
+    conn.commit()
+    conn.close()
+
+    status, payload = _request(port, "GET", "/api/questions?offset=0&limit=2")
+    assert status == 200
+    rows = json.loads(payload)
+    assert len(rows) == 2
+    assert "explanation_html" not in rows[0]
+    assert "stem_html" not in rows[0]
+    assert rows[0]["stem_text"].startswith("سوال")
+
+    status, payload = _request(port, "GET", f"/api/question/{rows[0]['id']}")
+    assert status == 200
+    full = json.loads(payload)
+    assert full["explanation_html"] == "<p>lesson</p>"
+    assert full["stem_html"] == "<p>stem</p>"

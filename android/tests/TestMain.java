@@ -38,6 +38,7 @@ public final class TestMain {
         urlParsing();
         taggedCounts();
         sharedQuestionNodes();
+        searchNormalization();
         scanTargets();
         qrDecoding();
         subtopicsAndAnswers();
@@ -187,6 +188,26 @@ public final class TestMain {
         } catch (Exception e) {
             check("answer test setup: " + e, false);
         }
+    }
+
+    // ---------------------------------------------------------------- search
+
+    /** The shared cases in tests/search_vectors.json, also run by Python + Node. */
+    private static void searchNormalization() {
+        // Escapes on both sides: the expected value must NOT keep the ZWNJ.
+        eq("search: ZWNJ",
+                "\u0645\u06CC\u0634\u0648\u062F",
+                Text.normalizeSearch("\u0645\u06CC\u200C\u0634\u0648\u062F"));
+        eq("search: arabic kaf", "کتاب", Text.normalizeSearch("كتاب"));
+        eq("search: alef maqsura", "علی", Text.normalizeSearch("على"));
+        eq("search: persian digits", "سؤال 123", Text.normalizeSearch("سؤال ۱۲۳"));
+        eq("search: arabic digits", "سؤال 123", Text.normalizeSearch("سؤال ١٢٣"));
+        eq("search: invisibles", "procalcitonin", Text.normalizeSearch("Procalcitonin\u200B\uFE0F"));
+        eq("search: whitespace", "چند خط متن", Text.normalizeSearch("  چند   خط\nمتن "));
+        eq("search: latin case", "abc", Text.normalizeSearch("ABC"));
+        eq("search: پروگنوز", "پروگنوز", Text.normalizeSearch("پروگنوز"));
+        eq("search: tatweel", "سلام", Text.normalizeSearch("سـلام"));
+        eq("search: null", "", Text.normalizeSearch(null));
     }
 
     // ------------------------------------------------------------------ checks

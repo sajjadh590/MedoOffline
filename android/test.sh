@@ -36,6 +36,7 @@ javac -encoding UTF-8 -nowarn -cp "$(cygpath -w "$ZXING")" -d "$OUT" \
     "$HERE/src/ir/medo/app/ScanTarget.java" \
     "$HERE/src/ir/medo/app/QrDecoder.java" \
     "$HERE/src/ir/medo/app/StateStore.java" \
+    "$HERE/src/ir/medo/app/Text.java" \
     "$HERE/src/ir/medo/app/Io.java" \
     "$HERE/tests/TestMain.java"
 java -cp "$(cygpath -w "$OUT");$(cygpath -w "$ZXING")" ir.medo.app.TestMain "$BUNDLE"

@@ -236,6 +236,53 @@
       color: #2d3748;
     }
 
+    /* A Pro lesson is a small document: headings, lists, quotes and the
+       site's key marker.  Unstyled, every block printed as the same line. */
+    .expl-content h4,
+    .expl-content h5,
+    .expl-content h6 {
+      font-size: 10pt;
+      color: #234e52;
+      margin: 8px 0 3px;
+      padding-right: 6px;
+      border-right: 3px solid #38a169;
+    }
+
+    .expl-content ul,
+    .expl-content ol {
+      margin: 3px 0 6px;
+      padding-right: 18px;
+    }
+
+    .expl-content li {
+      margin: 1px 0;
+    }
+
+    .expl-content mark {
+      background: #fefcbf;
+      color: inherit;
+      padding: 0 2px;
+    }
+
+    .expl-content blockquote {
+      margin: 6px 0;
+      padding: 4px 8px;
+      border-right: 3px solid #e2e8f0;
+      background: #f7fafc;
+      border-radius: 4px;
+    }
+
+    .answer-key-badge {
+      display: inline-block;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: #c6f6d5;
+      color: #22543d;
+      font-weight: bold;
+      font-size: 8.5pt;
+      white-space: nowrap;
+    }
+
     .mindmap-img {
       max-width: 100%;
       height: auto;
@@ -375,7 +422,7 @@
 
     <div class="expl-content">
       {% if q.explanation_html %}
-        {{ q.explanation_html | safe }}
+        {{ q.explanation_html | key_badge | safe }}
       {% else %}
         <p>{{ q.explanation_text }}</p>
       {% endif %}

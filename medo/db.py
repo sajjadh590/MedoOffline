@@ -244,7 +244,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             END;
         """)
         cur.execute("""
-            CREATE TRIGGER questions_au AFTER UPDATE ON questions BEGIN
+            CREATE TRIGGER questions_au AFTER UPDATE OF stem_text, explanation_text, options_json ON questions BEGIN
                 INSERT INTO questions_fts(questions_fts, rowid, stem_text, explanation_text, options_json)
                 VALUES('delete', old.id, old.stem_text, coalesce(old.explanation_text, ''), old.options_json);
                 INSERT INTO questions_fts(rowid, stem_text, explanation_text, options_json)
@@ -719,6 +719,50 @@ def get_all_questions(conn: sqlite3.Connection) -> list[dict]:
         d = dict(row)
         d["options"] = json.loads(d["options_json"])
         d["vote_percent"] = json.loads(d["vote_percent_json"]) if d["vote_percent_json"] else {}
+        results.append(d)
+    return _attach_nodes(conn, results)
+
+
+# The list endpoint and the web UI need the card, the search text and the
+# votes — never the stored HTML, which is the bulk of a Pro lesson.
+LIGHT_COLUMNS = (
+    "id, topic_id, tag_id, source_page, ordinal, stem_text, "
+    "explanation_text, explanation_status, options_json, "
+    "vote_percent_json, correct_index, answer_source, has_images, "
+    "category_path, bookmarked, user_selected_option"
+)
+
+
+def get_questions_light(
+    conn: sqlite3.Connection,
+    offset: int = 0,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """A page of the question list without the heavy HTML bodies.
+
+    ``/api/questions`` used to return ``SELECT *`` of the whole bank in one
+    JSON: tens of megabytes rebuilt and parsed on every page load, when the UI
+    shows one question at a time.  The full row is fetched on demand from
+    ``/api/question/<id>``.
+    """
+    sql = (f"SELECT {LIGHT_COLUMNS} FROM questions "
+           "ORDER BY coalesce(topic_id, 0) ASC, source_page ASC, ordinal ASC")
+    args: list = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        args = [int(limit), int(offset or 0)]
+    elif offset:
+        sql += " LIMIT -1 OFFSET ?"
+        args = [int(offset)]
+
+    results: list[dict] = []
+    for row in conn.execute(sql, args).fetchall():
+        d = dict(row)
+        d["options"] = json.loads(d["options_json"] or "[]")
+        d.pop("options_json", None)
+        d["vote_percent"] = (json.loads(d["vote_percent_json"])
+                             if d.get("vote_percent_json") else {})
+        d.pop("vote_percent_json", None)
         results.append(d)
     return _attach_nodes(conn, results)
 
