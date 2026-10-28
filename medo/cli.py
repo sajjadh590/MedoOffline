@@ -508,6 +508,27 @@ def diagnose_live(
                   "(data/diag is git-ignored).[/dim]")
 
 
+@app.command(name="live-report")
+def live_report_cmd(
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+    log_path: Optional[Path] = typer.Option(
+        None, "--log", help="log file (default: logs/medo.log)"),
+    network: bool = typer.Option(
+        True, "--network/--no-network",
+        help="also run the doctor's read-only network checks"),
+):
+    """
+    Print ONE pasteable status summary: doctor verdict, page drift, subtopic
+    counts, node/site-id coverage, repair queue, 429s and the current pace.
+    Counts and ids only — no stem, option or lesson text.
+    """
+    from medo import doctor as doctor_module
+    from medo import live_report as report
+
+    verdict = doctor_module.run_checks(db_path) if network else None
+    typer.echo(report.build_report(db_path, log_path or "", verdict))
+
+
 @app.command(name="doctor")
 def doctor_cmd(
     deep: bool = typer.Option(False, "--deep", help="Also open one question page and check the site's question id"),
