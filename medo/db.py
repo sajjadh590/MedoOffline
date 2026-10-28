@@ -204,6 +204,11 @@ def init_db(conn: sqlite3.Connection) -> None:
 
         # FTS5 full-text index over an external content table.
         #
+        # DEFERRED REMOVAL: the web UI searches its own normalized index, so
+        # this table, the three triggers below, search_questions() and its
+        # tests stay only until the pending live repair/site-id pass succeeds.
+        # After that they go in one migration (NOTES.md, open work #2).
+        #
         # Its columns must exist in `questions` under the *same* names: the
         # original declaration listed `options_text` (the real column is
         # `options_json`), so every content read — count(*), delete, rebuild —

@@ -154,3 +154,9 @@ node --check medo/web/app.js                     # UI syntax
 
 `pytest` generates the synthetic `tests/fixtures/before|after.mhtml` once via
 `scripts/make_fixtures.py`; real captures in `data/diag/` are never committed.
+
+A clean venv install was verified on 2026-10-28 (`python -m venv
+build/fresh-venv`, `pip install -e ".[dev]"`, then `pytest -q` → 300 passed).
+pip prints `typer 0.27.3 does not provide the extra 'all'`; the app still works
+because Rich is a direct dependency — drop `[all]` from `pyproject.toml` next
+time that line is touched.
