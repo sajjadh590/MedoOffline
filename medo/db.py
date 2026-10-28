@@ -188,6 +188,20 @@ def init_db(conn: sqlite3.Connection) -> None:
             );
         """)
 
+        # Resumable cursor of the subtopic-mapping pass (scripts/backfill_tags
+        # and the UI button).  Per subtopic so a 429 on subtopic four resumes
+        # at its own page instead of repeating subtopics one to three.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tag_sync_state (
+                topic_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL DEFAULT 0,
+                last_page INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'idle',
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (topic_id, tag_id)
+            );
+        """)
+
         # FTS5 full-text index over an external content table.
         #
         # Its columns must exist in `questions` under the *same* names: the
@@ -709,6 +723,36 @@ def get_asset_by_url(conn: sqlite3.Connection, original_url: str) -> Optional[di
     cur.execute("SELECT * FROM assets WHERE original_url = ?", (original_url,))
     row = cur.fetchone()
     return dict(row) if row else None
+
+
+def get_tag_sync_state(
+    conn: sqlite3.Connection, topic_id: int, tag_id: int = 0,
+) -> Optional[dict]:
+    """Where the subtopic-mapping pass stopped for this node."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM tag_sync_state WHERE topic_id = ? AND tag_id = ?",
+            (int(topic_id), int(tag_id)),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return dict(row) if row else None
+
+
+def update_tag_sync_state(
+    conn: sqlite3.Connection, topic_id: int, tag_id: int = 0,
+    last_page: int = 0, status: str = "running",
+) -> None:
+    """Record the mapping pass's cursor (tag_id 0 = whole-topic pass)."""
+    with transaction(conn) as cur:
+        cur.execute("""
+            INSERT INTO tag_sync_state (topic_id, tag_id, last_page, status, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(topic_id, tag_id) DO UPDATE SET
+                last_page = excluded.last_page,
+                status = excluded.status,
+                updated_at = CURRENT_TIMESTAMP
+        """, (int(topic_id), int(tag_id), int(last_page), status))
 
 
 def get_scrape_state(conn: sqlite3.Connection, topic_id: int) -> Optional[dict]:
@@ -1481,6 +1525,29 @@ def declared_questions(conn: sqlite3.Connection, topic_id: int,
     except sqlite3.OperationalError:
         return 0
     return int((row[0] if row else 0) or 0)
+
+
+def subtopic_targets(conn: sqlite3.Connection, topic_id: int) -> list[dict]:
+    """The «?tag=» subtopics stored for a topic, in the tree's own order.
+
+    A whole-topic page never says which subtopic a question belongs to, so a
+    download queues these instead of the unfiltered topic when they exist.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT title, source_url FROM categories "
+            "WHERE source_url LIKE ? ORDER BY position, id",
+            (f"/qbank/topic-id-{int(topic_id)}?tag=%",),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out: list[dict] = []
+    for row in rows:
+        tag = tag_id_of(row["source_url"])
+        if tag:
+            out.append({"topic_id": int(topic_id), "tag_id": int(tag),
+                        "subtopic_title": row["title"]})
+    return out
 
 
 def record_usage(

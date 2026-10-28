@@ -1486,10 +1486,16 @@ class Harvester:
         refill: bool = False,
         tag_id: Optional[int] = None,
         subtopic_title: Optional[str] = None,
+        skip_known: bool = False,
     ) -> dict:
         """Scrape one topic or one of its subtopics («?tag=»).
 
         Resumes from the matching cursor unless ``start_page`` is given.
+
+        ``skip_known`` is the reconciliation pass after a topic's subtopics:
+        questions already stored with a site id are counted and passed over
+        without revealing or re-storing them, so only the ones no subtopic
+        page showed are paid for.
         """
         self._setup_signal_handlers()
         applog.install_tee()  # mirror all prints into logs/medo.log
@@ -1499,6 +1505,15 @@ class Harvester:
         conn = get_connection(self.db_path)
         init_db(conn)
         state = self._read_state(conn, topic_id, tag_id)
+        known_ids: set[int] = set()
+        if skip_known:
+            known_ids = {
+                int(r[0]) for r in conn.execute(
+                    "SELECT site_question_id FROM questions WHERE topic_id = ? "
+                    "AND site_question_id IS NOT NULL", (topic_id,))
+            }
+            print(f"[i] topic {topic_id}: {len(known_ids)} question(s) already "
+                  "stored — looking only for the missing ones")
 
         current_page = start_page if start_page is not None else (
             ((state["last_page"] if state else 0) or 0) + 1
@@ -1512,6 +1527,7 @@ class Harvester:
               f"{' (refill)' if refill else ''}")
 
         scraped = 0
+        skipped_known = 0
         consecutive_errors = 0
         backoff = BACKOFF_BASE
         status = "completed"
@@ -1630,6 +1646,17 @@ class Harvester:
                         raise ScraperStopped("paused",
                                              f"no question at page {current_page}")
 
+                    if known_ids and q.site_question_id in known_ids:
+                        # Already stored through a subtopic: no reveal, no
+                        # write.  Keep the position truthful and move on.
+                        skipped_known += 1
+                        if self._next_state(page) != "ready" or not self._click_next(page):
+                            raise ScraperStopped("completed",
+                                                 f"end of list at page {current_page}")
+                        current_page += 1
+                        self._polite_delay()
+                        continue
+
                     # Answer fallback (only when the marker did not give it)
                     if needs_submit(q):
                         submitted = self._submit_for_answer(page, topic_id, current_page)
@@ -1703,6 +1730,7 @@ class Harvester:
             tail.close()
         return {
             "scraped_count": scraped,
+            "skipped_known": skipped_known,
             "last_page": int(final_state.get("last_page") or 0),
             "status": status,
             "detail": detail,

@@ -61,6 +61,7 @@ def scrape(
     max_minutes: Optional[float] = typer.Option(None, "--max-minutes", help="Stop cleanly after N minutes (time-boxed batch)"),
     max_questions: Optional[int] = typer.Option(None, "--max-questions", help="Stop cleanly after N questions"),
     refill: bool = typer.Option(False, "--refill-explanations", help="Revisit only questions whose explanation_status != full"),
+    whole_topic: bool = typer.Option(False, "--whole-topic", help="Download the unfiltered topic instead of its subtopics one by one"),
     delay_min: float = typer.Option(1.5, "--delay-min", help="Minimum uniform random delay in seconds"),
     delay_max: float = typer.Option(3.0, "--delay-max", help="Maximum uniform random delay in seconds"),
     headless: bool = typer.Option(True, "--headless/--no-headless", help="Run browser in headless mode"),
@@ -87,8 +88,32 @@ def scrape(
         console.print("[bold cyan][*] Refilling explanations (only non-full)...[/bold cyan]")
         result = harvester.refill_explanations([topic] if topic else None)
     elif topic is not None:
-        console.print(f"[bold cyan][*] Starting harvester for topic {topic}...[/bold cyan]")
-        result = harvester.scrape_topic(topic_id=topic, start_page=start_page, max_pages=max_pages)
+        from medo.db import subtopic_targets
+
+        conn = get_connection(db_path)
+        subtopics = [] if whole_topic else subtopic_targets(conn, topic)
+        conn.close()
+        if subtopics:
+            console.print(f"[bold cyan][*] Downloading {len(subtopics)} subtopic(s) "
+                          f"of topic {topic} one by one (--whole-topic skips "
+                          "this)...[/bold cyan]")
+            result = {"scraped_count": 0, "status": "completed",
+                      "detail": "", "last_page": 0}
+            for sub in subtopics:
+                part = harvester.scrape_topic(
+                    topic_id=topic, start_page=start_page, max_pages=max_pages,
+                    tag_id=sub["tag_id"], subtopic_title=sub["subtopic_title"])
+                result["scraped_count"] += part["scraped_count"]
+                result["last_page"] = part["last_page"]
+                result["status"] = part["status"]
+                result["detail"] = part.get("detail", "")
+                if part["status"] in {"auth_required", "limit", "blocked", "error",
+                                     "interrupted", "max_minutes", "max_questions",
+                                     "throttled"}:
+                    break
+        else:
+            console.print(f"[bold cyan][*] Starting harvester for topic {topic}...[/bold cyan]")
+            result = harvester.scrape_topic(topic_id=topic, start_page=start_page, max_pages=max_pages)
     elif all_topics:
         conn = get_connection(db_path)
         topics = list_topic_ids(conn, include_done=False)

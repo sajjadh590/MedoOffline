@@ -41,6 +41,7 @@ from medo.db import (
     save_run_request,
     set_bookmark,
     set_user_answer,
+    subtopic_targets,
     tag_id_of,
     toggle_bookmark,
 )
@@ -197,19 +198,7 @@ class ScraperTaskController:
                 if target["tag_id"] is not None:
                     expanded.append(target)
                     continue
-                rows = conn.execute(
-                    "SELECT source_url, title FROM categories "
-                    "WHERE source_url LIKE ? ORDER BY position",
-                    (f"/qbank/topic-id-{target['topic_id']}?tag=%",),
-                ).fetchall()
-                subs = [
-                    {"topic_id": target["topic_id"],
-                     "tag_id": int(tag),
-                     "subtopic_title": row["title"]}
-                    for row in rows
-                    for tag in [tag_id_of(row["source_url"])]
-                    if tag
-                ]
+                subs = subtopic_targets(conn, target["topic_id"])
                 if subs:
                     applog.log(f"[scrape] topic {target['topic_id']}: "
                                f"{len(subs)} subtopic(s) — downloading one by one")
@@ -314,7 +303,6 @@ class ScraperTaskController:
                 self.harvester = Harvester(
                     db_path=db_path,
                     on_progress=_on_progress,
-                    fast=True,
                 )
                 for index, target in enumerate(wanted):
                     if self.harvester._interrupted:
@@ -369,6 +357,28 @@ class ScraperTaskController:
                                   "throttled"}:
                         break
 
+                # Every subtopic can be complete and the topic still be short:
+                # a question may belong to no subtopic page at all.  The site's
+                # declared count is the only authority, and it is paid for with
+                # ONE pass that skips everything already stored.
+                if status == "completed":
+                    for tid in sorted({t["topic_id"] for t in wanted
+                                       if t["tag_id"] is not None}):
+                        missing = self._missing_count(db_path, tid)
+                        if missing <= 0:
+                            continue
+                        self._push(f"  ↳ مبحث {tid}: {missing} سوال در هیچ "
+                                   "زیرمبحثی نبود — یک پاس کامل، فقط برای "
+                                   "همان‌ها...")
+                        res = self.harvester.scrape_topic(tid, skip_known=True)
+                        saved_now = int(res.get("scraped_count", 0) or 0)
+                        total_saved += saved_now
+                        status = res.get("status", "completed")
+                        self._push(f"  ↳ مبحث {tid}: {saved_now} سوال تازه پیدا شد"
+                                   + (f" · {res.get('detail')}" if res.get("detail") else ""))
+                        if status != "completed":
+                            break
+
                 self.status = status
                 if status == "auth_required":
                     self._push(
@@ -420,7 +430,7 @@ class ScraperTaskController:
             except Exception as ex:
                 self.status = "error"
                 self._push(f"خطا در استخراج: {ex}")
-                applog.log(f"[scrape] traceback topics={targets}:\n"
+                applog.log(f"[scrape] traceback topics={wanted}:\n"
                            f"{traceback.format_exc()}")
             finally:
                 self.is_running = False
@@ -820,6 +830,19 @@ class ScraperTaskController:
                 conn.close()
         except Exception:
             return 0, "", 0
+
+    def _missing_count(self, db_path: Path | str, topic_id: int) -> int:
+        """Declared questions of a topic minus what the archive holds for it."""
+        try:
+            conn = get_connection(db_path)
+            try:
+                declared = declared_questions(conn, int(topic_id))
+                stored = count_node_questions(conn, int(topic_id))
+                return max(int(declared) - int(stored), 0)
+            finally:
+                conn.close()
+        except Exception:
+            return 0
 
     def _reset_truncated_target(self, topic_id: int, tag_id: int) -> None:
         """Send a truncated subtopic back to page 1 on its next run."""
