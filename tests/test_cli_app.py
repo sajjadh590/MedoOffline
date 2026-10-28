@@ -59,3 +59,26 @@ def test_keystore_backup_keeps_the_key_and_its_digest(tmp_path):
         assert zf.read("medo-debug.keystore") == b"fake-key-bytes"
         assert zf.read("SHA-256.txt").decode().strip() == \
             hashlib.sha256(b"fake-key-bytes").hexdigest()
+
+
+def test_readme_only_mentions_flags_the_cli_defines():
+    """Documentation drift: a renamed flag must break the build, not the user."""
+    import re
+    from pathlib import Path
+
+    import typer
+
+    root = typer.main.get_command(app)
+    known = {"--help"}
+    for cmd in root.commands.values():
+        for param in cmd.params:
+            known.update(param.opts)
+            known.update(getattr(param, "secondary_opts", ()) or ())
+    # Flags of the tools the README tells you to run, not of this CLI.
+    known.update({"--no-proxy-server", "--check"})
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(
+        encoding="utf-8")
+    mentioned = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]+", readme))
+    unknown = sorted(mentioned - known)
+    assert not unknown, f"README mentions flags the CLI does not define: {unknown}"

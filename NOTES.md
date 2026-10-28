@@ -1701,3 +1701,121 @@ fire-and-forget صدا می‌زد: `POST /api/answer` می‌نوشت ولی ه
 - **تأیید:** `pytest -q` → **251 passed**؛ `android/test.sh` → ALL PASSED (122)؛
   `node --check` پاک. اجرای زنده روی سایت انجام نشد (شبکه به medofast.ir
   نمی‌رسد)؛ `medo diagnose-live` و لاگ `[position]` برای همین هستند.
+
+## Phase 4 — صف ترمیم، دکتر، سرعت تطبیقی، قفل کار و PDF درخواستی
+
+- **ترمیم فقط آن‌جایی که نشستِ لاگین می‌تواند بهتر کند:** ستون
+  `questions.fetched_as` (`guest` / `login` / `unknown`) هنگام ذخیره از نشست
+  فعلی پر می‌شود. صف ترمیم = `fetched_as <> 'login'` یا پاسخ خالی یا درس‌نامهٔ
+  خالی/ناقص/قفل‌شده. همهٔ ردیف‌های قدیمی به‌صورت پیش‌فرض `unknown` هستند، پس
+  یک‌بار از صف رد می‌شوند (همان «متن قبل از فاز ۱» که باید از سایت دوباره
+  خوانده شود). `count_needing_repair` و `questions_needing_repair` در `db.py`.
+- **یک کار ترمیم قابل‌ادامه:** `audit_answers` صف را به ترتیب `id` می‌رود،
+  هر سؤال را با `site_question_id` یا امضای گزینه‌ها در صفحه‌های همان مبحث
+  پیدا می‌کند، «نمایش جواب» را همان‌طور که اسکرپر می‌زند اجرا می‌کند و فقط
+  چیزهایی را می‌نویسد که سایت نشان داده است؛ هر سؤال جدا commit می‌شود.
+  تصویر مایندمپ هم با همان `Harvester._store_assets` دانلود و در HTML جایگزین
+  می‌شود (و `has_images` با `max(...)` بالا می‌رود). پیام سقف روزانه (429 یا
+  متن محدودیت) کار را با `status="limit"` متوقف می‌کند و باقی صف را می‌گوید.
+- **پیش‌نیاز ورود:** ترمیم بدون `data/storage_state.json` شروع نمی‌شود و پیام
+  فارسی می‌دهد؛ هیچ حساب یا کوکی جعلی ساخته نمی‌شود.
+- **`medo doctor` + `/api/doctor`:** پروکسی مردهٔ ویندوز، DNS جعلی VPN در
+  برابر مسیر مستقیم، TLS به medofast.ir، وضعیت نشست و (با `--deep`) وجود
+  `#question-meta` را می‌سنجد و یک جملهٔ فارسی می‌دهد: «آماده استخراج» /
+  «نشست منقضی شده؛ دوباره وارد شو» / «اختلال در مسیر شبکه یا فیلترشکن» +
+  راهنمای افزودن `domain:medofast.ir` و `geosite:ir` به قواعد DIRECT. شروع
+  scrape و هر کار شبکه‌ای وقتی مسیر قرمز است رد می‌شود (PDF محلی نه).
+- **سرعت تطبیقی (`medo/pacing.py`):** شروع ۱.۵–۳ ثانیه، با هر ۴۲۹ دو برابر
+  تا سقف ۱۲، احترام به `Retry-After` (۵ تا ۳۰۰ ثانیه)، بعد از هر ۴۰ صفحهٔ
+  سالم ۱۰٪ کم‌تر و کف ۱٫۲. `Harvester.pace` تنها مالک بازه است؛ `fast=True`
+  از `medo/server.py` قبلاً حذف شده بود و فقط در اسکریپت‌های تشخیصی مانده.
+- **قفل کار:** `_take_slot` زیر یک `threading.Lock` است و
+  `start`/`start_answers_audit`/`start_tag_sync` همه از آن رد می‌شوند
+  (نوع بازگشتی `_begin_repair` به `tuple[bool, str]` تغییر کرد تا دلیل رد
+  شدن به کاربر برسد).
+- **PDF فقط با درخواست:** بازسازی خودکار بعد از هر اجرا حذف شد؛
+  `start_pdf_build` + `POST /api/pdf` + دکمهٔ «ساخت PDF کتاب» (مبحث فعال اگر
+  یکی انتخاب شده باشد، وگرنه کل بانک). چون رندر محلی است، از `doctor` رد
+  نمی‌شود و با همان قفل کار اجرا می‌شود.
+- **تست‌ها:** `test_pacing` (بازه، سقف، Retry-After، کوچک‌شدن)، `test_doctor`
+  (سه حکم)، `test_answer_audit` (ترمیم با شناسه/امضا، رد شدن صفحهٔ ناشناس،
+  ذخیرهٔ تصویر)، `test_server_api` (صف ترمیم در `/api/bank/health`، PDF بدون
+  شبکه و قفل کار). `pytest` → **266 passed**؛ `android/test.sh` → ALL PASSED
+  (122)؛ `node --check` پاک.
+- **اجرای زنده انجام نشد:** شبکهٔ این دستگاه به medofast.ir نمی‌رسد؛ رفتار
+  واقعی doctor/ترمیم/سرعت فقط با اجرای مالک تأیید می‌شود. لاگ‌ها:
+  `[doctor] …`، `[audit] …`، `[pace] …`.
+
+## Phase 5 — جستجوی یکسان، API سبک، درس‌نامهٔ کتابی، آندروید و بانک گوشی
+
+- **دو باگ واقعی پیدا شد که تست‌ها نمی‌گرفتند:** `answer_audit.py` از
+  `time.sleep` استفاده می‌کرد بدون `import time` (فقط وقتی صف جلو می‌رفت
+  منفجر می‌شد) و `_take_slot` بعد از شکستن `_begin_repair` به `db_path`
+  دسترسی نداشت. هر دو قبل از commit اصلاح شدند.
+- **یک نرمال‌سازی جستجو برای سه زبان:** `normalize_search_text` در
+  `text_utils.py`، `medo/web/normalize.js` (هم `<script>` هم `require`) و
+  `android/.../Text.java`. قرارداد مشترک: `tests/search_vectors.json`.
+  ی/ك عربی → فارسی، ZWNJ و نویسه‌های نامرئی حذف، ارقام فارسی/عربی → ASCII،
+  فاصله‌ها جمع، حروف کوچک. تست Python + Node (اگر node باشد) + TestMain جاوا
+  همین بردارها را می‌سنجند.
+- **سرچ سبک:** `/api/questions` حالا ردیف‌های سبک (بدون HTML) با
+  `offset`/`limit` می‌دهد و `/api/question/<id>` بدنهٔ کامل را. UI در صفحه‌های
+  ۴۰۰تایی می‌خواند، برای هر سؤال **یک** رشتهٔ نرمال‌شده می‌سازد و جستجو را با
+  دیبانس ۲۰۰ms اجرا می‌کند؛ اولین باری که یک درس‌نامه باز می‌شود، بدنه‌اش
+  گرفته و دوباره رندر می‌شود. `SELECT *` قبلی کل بانک را در هر بار بارگذاری
+  می‌فرستاد.
+- **تریگر FTS:** `AFTER UPDATE` → `AFTER UPDATE OF stem_text,
+  explanation_text, options_json` تا کلیک پاسخ/بوکمارک کل ردیف را ایندکس
+  نکند. تصمیم دربارهٔ خود FTS (استفاده در UI یا حذف) در PROMPT §11 باز مانده.
+- **درس‌نامهٔ کتابی:** استایل `h4/h5/h6`، `ul/ol/li`، `mark`، `blockquote` و
+  نشان `answer-key-badge` برای «تایید گزینه N» در `style.css` و قالب کتاب؛
+  در PDF با فیلتر Jinja `key_badge`.
+- **آندروید از کلون تمیز:** قاعدهٔ `*.xml` در `.gitignore` به `/coverage.xml`
+  محدود شد و `android/AndroidManifest.xml` + `android/res/**` به گیت برگشتند
+  (تست `git ls-files` دارد). `build.sh` نسخه را از manifest می‌خواند و بعد از
+  APK امضاشده `versionCode` را یکی بالا می‌برد؛ کلید گم‌شده دیگر با پیام
+  فارسی متوقف می‌کند و `medo keystore-backup` زیپ + SHA-256 می‌سازد.
+- **بانک گوشی v2:** `.medo` حالا زیپ است: `index.json` (درخت، شمارش‌ها و یک
+  ردیف سبک برای هر سؤال) + `chunks/<category>.json` برای بدنه‌ها. `Bank.load`
+  اول index را می‌خواند و بعد هر chunk را مستقیم از زیپ و یکی‌یکی، تا کل فایل
+  سه بار در حافظه نباشد؛ فایل JSON قدیمی هم خوانده می‌شود. جستجوی گوشی با
+  ایندکس کلمه (`Bank.searchIds`) انجام می‌شود و `BrowseActivity` یک بار در هر
+  query آن را می‌پرسد. `build-bank` هم `--category` (تکرارشدنی) و
+  `--images/--no-images` دارد (WebP داخل HTML).
+- **انحراف عمدی از طرح:** قرار بود chunkها **هنگام باز کردن** بار شوند با
+  LRU 2؛ چون `Question` تغییرناپذیر است و همهٔ صفحه‌ها `bank.questions` را
+  می‌گردند، فعلاً همهٔ chunkها در زمان load یکی‌یکی خوانده می‌شوند (حافظهٔ
+  اوج = یک chunk، نه سه نسخهٔ کل فایل). مسیر ارتقا در PROMPT §11 آمده.
+- **تست‌ها:** `test_search_normalization` (۱۱)، `test_server_api` (API سبک و
+  بدنهٔ درخواستی)، `test_android_bundle` (زیپ، index سبک، انتخاب دسته،
+  Content-Type اشتراک)، `android/test.sh` → **ALL PASSED (140)** شامل زیپ و
+  جستجوی کلمه، `pytest` → **283 passed**.
+- **تأیید ساخت:** `bash android/build.sh` با manifest v2 (versionCode 2،
+  versionName 1.2) و بامپ به 3، APK ۲۸۰KB امضا شد؛ `build-bank` بستهٔ زیپ
+  ۰٫۳MB از بانک واقعی ساخت و `android/test.sh` آن را خواند.
+
+## Phase 6 — تست از کلون تازه، خانه‌تکانی، README از خروجی واقعی
+
+- **کلون تازه:** `tests/conftest.py` یک fixture سطح‌جلسه دارد که اگر
+  `tests/fixtures/before.mhtml`/`after.mhtml` نبودند `scripts/make_fixtures.py`
+  را یک‌بار اجرا می‌کند (فایل‌های سنتزی گیت‌ایگنورند چون یک capture واقعی متن
+  پولی دارد؛ هیچ‌وقت ساخته نمی‌شوند مگر همین‌ها). با حذف دستی دو فایل تست
+  شد: ۶۸ تست parser دوباره سبز شدند. `pytest`/`pytest-asyncio` به
+  `[project.optional-dependencies].dev` رفتند و `aiofiles` (بدون هیچ import)
+  حذف شد.
+- **خانه‌تکانی:** `.github/workflows/scrape.yml` حذف شد (اسکرپ محلی است و
+  خروجی‌اش هرگز نباید artifact شود)، `launcher.log` از گیت خارج و
+  `*.log` ایگنور شد، `_patch/` (یک patcher یک‌بارمصرف) و
+  `inspect_shortcut.ps1` (بدون ارجاع) حذف شدند، و یک فایل آشغال
+  `tests/fixtures/tests،fixtures،before.mhtml` (کپی ۱٫۲MB) پاک شد.
+- **README بازنویسی شد** از خروجی واقعی `--help` همهٔ دستورها، با جدول
+  دستور/فلگ‌ها، سرعت تطبیقی، رابط وب (دانلود زیرمبحثی، ترمیم، پخش تگ، دکتر،
+  PDF درخواستی، جستجو)، آندروید (ساخت با manifest/keystore، بانک زیپ،
+  `--category`/`--images`)، عیب‌یابی سه‌حکمی و حریم خصوصی داده‌ها. تست
+  `test_readme_only_mentions_flags_the_cli_defines` هر فلگ `--x` در README را
+  با فلگ‌های واقعی typer مقایسه می‌کند (دو فلگ ابزار بیرونی whitelist شده‌اند).
+- **PROMPT.md به‌روز شد:** بخش ۸ وضعیت فعلی، جدول ۷.۷ برای باگ‌های فاز ۰–۶
+  (شامل «چه چیزی جواب نداد»)، بخش ۱۱ نقشهٔ فایل‌ها و کارهای باقی‌مانده.
+- **تأیید نهایی:** `pytest` → **283 passed**؛ `android/test.sh` → ALL PASSED
+  (140)؛ `node --check` دو فایل و `compileall medo` پاک؛ کلون از `git archive`
+  پس از این commit دوباره تست می‌شود.

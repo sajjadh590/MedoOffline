@@ -1,115 +1,194 @@
-# MedoOffline 🩺
+# MedoOffline — آرشیو آفلاین بانک سوالات مدوفست
 
-آرشیو و آینه آفلاین بانک سوالات تخصصی پزشکی [مدوفست](https://medofast.ir/qbank/) (MCQ، راست‌چین و فارسی).
+A local, offline-first mirror of the Persian medical Q&A site **medofast.ir**.
+It archives multiple-choice questions (stem, options, vote percentages, correct
+answer and the Pro lesson), then lets you study them **with no internet at all**:
 
-این پروژه به شما امکان می‌دهد سوالات و آزمون‌های پزشکی را به صورت کاملاً آفلاین مرور، تمرین و چاپ کنید:
-1. **وب‌اپلیکیشن تعاملی آفلاین**: محیط تمرینی شبیه به سایت اصلی با طراحی مدرن شیشه‌ای (Glassmorphism)، تم تاریک/روشن، نمایش انیمیشنی توزیع پاسخ کاربران، آکاردئون پاسخ تشریحی، پالت پرش به سوال، نشان‌کردن و کلیدهای میانبر.
-2. **کتابچه چاپی PDF استاندارد**: خروجی PDF با ساختار منظم آزمون، تفکیک سوالات، جدول کلید پاسخنامه، و پاسخ تشریحی کامل با نمودارها و نقشه‌های ذهنی با موتور Playwright.
-3. **اسکریپر محترمانه و تاب‌آور**: استخراج تک‌درخواستی با وقفه تصادفی (۱.۵ تا ۳ ثانیه)، مسدودسازی تبلیغات/ردیاب‌ها، مدیریت خروج اضطراری (Ctrl+C)، و قابلیت ادامه خودکار (Resume).
+* **Desktop** — a Python CLI plus a local web app at `127.0.0.1` (Persian RTL,
+  light/dark theme, keyboard shortcuts).
+* **Android** — a dependency-free Java app (`dist/medo.apk`, ~280 KB) that reads
+  a transferred `.medo` bank and works fully offline.
 
----
-
-## 🚀 شروع سریع (Quick Start)
-
-### ۱. نصب نیازمندی‌ها
-
-پروژه با پایتون ۳.۱۱+ و محیط مجازی آماده است:
-
-```powershell
-# فعال‌سازی محیط مجازی
-.\.venv\Scripts\Activate.ps1
-
-# اجرای تست‌های جامع
-pytest -v
-```
-
-> **نکته:** جهت استفاده از مرورگر بدون نیاز به دانلود بسته‌های سنگین Playwright، این برنامه مرورگر Google Chrome یا Microsoft Edge نصب شده روی ویندوز را به صورت خودکار شناسایی و استفاده می‌کند.
+The archive lives in `data/medo.db` on this PC. GitHub holds **code only** — no
+scraped text, no session, no builds.
 
 ---
 
-## 🛠️ راهنمای دستورات CLI (`medo`)
+## راه‌اندازی سریع
 
-تمامی قابلیت‌ها از طریق ابزار خط فرمان `medo` در دسترس است:
+```bash
+python -m venv .venv
+.venv/Scripts/pip install -e .[dev]      # Windows (bash: .venv/bin/pip)
+playwright install chromium              # only for the bundled browser fallback
 
-### ۱. ورود به حساب کاربری (`login`)
-مرورگر را باز کرده تا با حساب کاربری خود لاگین کنید. نشست در فایل `data/storage_state.json` ذخیره می‌شود (رمز عبور شما هرگز ذخیره یا پردازش نمی‌شود):
-```powershell
-python -m medo.cli login
+python -m medo.cli login                 # opens a browser; log in yourself
+python -m medo.cli doctor                # «آماده استخراج» or what is wrong
+python -m medo.cli scrape --topic 79     # or use the web UI
+python -m medo.cli serve                 # http://127.0.0.1:8080
 ```
 
-### ۲. استخراج سوالات یک مبحث (`scrape`)
-استخراج هوشمند، تک‌به‌تک و با وقفه تصادفی جهت جلوگیری از بلاک شدن:
-```powershell
-python -m medo.cli scrape --topic 79
-```
-*گزینه‌ها:*
-- `--start N`: شروع از صفحه دلخواه (در غیر این صورت از آخرین نقطه متوقف‌شده ادامه می‌یابد)
-- `--max M`: حداکثر تعداد صفحات برای استخراج در این نوبت
-- `--delay-min 1.5 --delay-max 3.0`: بازه وقفه تصادفی به ثانیه
-
-### ۳. مشاهده آمار و وضعیت دیتابیس (`stats`)
-نمایش خلاصه سوالات ذخیره‌شده، پاسخ‌ها، فایل‌های چندرسانه‌ای و مباحث:
-```powershell
-python -m medo.cli stats
-```
-
-### ۴. راستی‌آزمایی یکپارچگی داده‌ها (`verify`)
-بررسی مغایرت‌های احتمالی پاسخ، گزینه‌های ناقص یا سوالات فاقد پاسخ تشریحی:
-```powershell
-python -m medo.cli verify
-```
-
-### ۵. اجرای سرور وب تعاملی آفلاین (`serve`)
-راه‌اندازی سرور لوکال برای آزمون تعاملی و ثبت پاسخ‌ها:
-```powershell
-python -m medo.cli serve --port 8080
-```
-سپس آدرس `http://127.0.0.1:8080` را در مرورگر باز کنید.
-
-### ۶. خروجی پکیج وب مستقل (`export-web`)
-ساخت بسته مستقل در پوشه `dist/` (قابل اجرا با دابل‌کلیک روی `index.html` بدون نیاز به پایتون یا سرور):
-```powershell
-python -m medo.cli export-web --output dist/
-```
-
-### ۷. تولید کتابچه چاپی PDF (`export-pdf`)
-تولید فایل PDF آزمون با قالب‌بندی استاندارد A4 و پشتیبانی کامل از متن دوزبانه و RTL:
-```powershell
-python -m medo.cli export-pdf --topic 79 --output dist/medo_test_book.pdf
-```
-
-### ۸. درون‌ریزی فیکسچرهای آزمایشی (`import-fixtures`)
-برای تست آفلاین برنامه با استفاده از فایل‌های نمونه ذخیره‌شده:
-```powershell
-python -m medo.cli import-fixtures
-```
+`login` stores the session in `data/storage_state.json` (git-ignored). Nothing
+here touches, stores or asks for your password; the site's own login page does.
 
 ---
 
-## ⌨️ کلیدهای میانبر در وب‌اپلیکیشن
+## دستورها
 
-| کلید | عملکرد |
-|---|---|
-| `1` تا `4` | انتخاب گزینه مورد نظر |
-| `←` یا `j` | رفتن به سوال بعدی |
-| `→` یا `k` | برگشت به سوال قبلی |
-| `b` | نشان‌کردن (Bookmark) سوال جاری |
-| `e` | باز/بسته کردن کادر پاسخ تشریحی |
-| `/` | فوکوس سریع روی کادر جستجو |
-| `Esc` | بستن تصویر بزرگ‌نمایی شده یا لغو جستجو |
+Every flag below comes from the command's own `--help`.
+
+| Command | What it does | Main flags |
+| --- | --- | --- |
+| `login` | Open the site and save the signed-in session | `--state` |
+| `doctor` | One Persian verdict: can a download work now? | `--deep`, `--topic`, `--db` |
+| `discover` | Crawl the site's menu once and store its exact tree | `--headless`, `--state`, `--db` |
+| `scrape` | Download one topic, one subtopic (`--tag`) or everything | `--topic`, `--all`, `--start`, `--max`, `--max-minutes`, `--max-questions`, `--refill-explanations`, `--whole-topic`, `--delay-min`, `--delay-max`, `--headless`, `--state`, `--db` |
+| `serve` | Local web app | `--port`, `--db` |
+| `build-pdf` | Printable book, built only when asked | `--output`, `--topic`, `--title`, `--answers`, `--partial`, `--db` |
+| `build-web` | Self-contained static web bundle (works over `file://`) | `--output`, `--topic`, `--partial`, `--db` |
+| `build-bank` | `.medo` bank for the phone | `--output`, `--category`, `--images`, `--db` |
+| `share` | Read-only Wi-Fi server for the phone | `--port`, `--bind`, `--db` |
+| `stats` / `verify` | Counts and integrity checks | `--db` |
+| `diagnose-tags` | Stored questions without a subtopic, truncated subtopics | `--db` |
+| `diagnose-live` | One live probe: page counter, `?tag=` filtering | `--topic`, `--tag`, `--headless`, `--state` |
+| `check-site-ids` | Fail loudly if the site stops exposing its question id | `--topic`, `--tag`, `--headless`, `--state` |
+| `import-fixtures` | Import synthetic/captured MHTML into a test DB | `--db` |
+| `keystore-backup` | Zip the Android signing key + its SHA-256 into `dist/` | `--keystore`, `--output` |
+
+`export-pdf`, `export-web` and `export-android` are kept as aliases of
+`build-pdf`, `build-web` and `build-bank`.
+
+### نرخ درخواست‌ها
+
+One request at a time. The pause starts at **1.5–3 s**, doubles on a `429`
+(up to 12 s, honouring `Retry-After`) and settles back after 40 clean pages,
+never below 1.2 s. A run that hits a quota or a login wall stops with a
+resumable cursor instead of pretending the topic finished.
 
 ---
 
-## 📁 ساختار ماژول‌ها
+## کارهایی که رابط وب انجام می‌دهد
 
-- [`medo/parser.py`](file:///E:/MedoOffline/medo/parser.py): پارسر مقاوم در برابر مبهم‌سازی کلاس‌ها، استخراج گزینه‌های Base64، حذف کاراکترهای نامرئی و تعیین پاسخ صحیح.
-- [`medo/db.py`](file:///E:/MedoOffline/medo/db.py): پایگاه داده SQLite در حالت WAL با FTS5 و جدول وضعیت Resume.
-- [`medo/auth.py`](file:///E:/MedoOffline/medo/auth.py): مدیریت ورود تعاملی با Playwright.
-- [`medo/assets.py`](file:///E:/MedoOffline/medo/assets.py): دانلودر و بهینه‌ساز تصاویر نقشه‌های ذهنی با Pillow به فرمت WebP.
-- [`medo/browser.py`](file:///E:/MedoOffline/medo/browser.py): لانچر مرورگر محلی ویندوز (Google Chrome / Edge).
-- [`medo/scraper.py`](file:///E:/MedoOffline/medo/scraper.py): موتور اسکرپر محترمانه با وقفه زمانی و مدیریت خروج تمیز.
-- [`medo/pdf.py`](file:///E:/MedoOffline/medo/pdf.py): تولیدکننده PDF آزمون با Jinja2 و Playwright.
-- [`medo/web/`](file:///E:/MedoOffline/medo/web/): فایل‌های فرانت‌اند (`index.html`, `style.css`, `app.js`).
-- [`medo/server.py`](file:///E:/MedoOffline/medo/server.py): وب‌سرور سبک پایتون با REST API.
-- [`medo/exporter.py`](file:///E:/MedoOffline/medo/exporter.py): سازنده بسته استاتیک برای استفاده بدون سرور.
-- [`NOTES.md`](file:///E:/MedoOffline/NOTES.md): لاگ تصمیمات فنی، جزییات دیتابیس و مستندات مهندسی معماری.
+* **دانلود**: click a topic/category in the sidebar. When the topic has
+  subtopics, the download queues the subtopics (so every question lands in the
+  right `?tag=` slice), then one reconciliation pass for anything missing.
+* **ترمیم پاسخ‌ها و درس‌نامه‌ها**: re-reads only the questions the signed-in
+  session could still improve — no answer, no/partial/locked lesson, or a page
+  stored as a guest. It commits per question and stops cleanly on a daily limit.
+* **پخش سوال‌ها در زیرمبحث‌ها**: maps already-stored questions to their
+  subtopics, resuming page by page after a `429`.
+* **بررسی شبکه و آمادگی دانلود** (`/api/doctor`): proxy / DNS / TLS / session /
+  site-id check with a Persian verdict.
+* **ساخت PDF کتاب**: built on demand for the selected category (or the whole
+  bank) instead of after every download.
+* **جستجو**: one canonical form for Persian (Arabic ي/ك → ی/ک, ZWNJ and the
+  site's invisible variation selectors removed, Persian/Arabic digits → ASCII,
+  case folded) shared by Python, the browser and Android.
+* Shortcuts: `1`–`5` pick an option, `j`/`k` or arrows navigate, `b` bookmark,
+  `e` explanation, `/` search, `Esc` closes dialogs. The theme has a light
+  default and a dark mode.
+
+---
+
+## آندروید
+
+### ساختن APK
+
+The build is offline and needs the portable toolchain in `tools/` (JDK 8 +
+Android SDK build-tools 30.0.3). It is not in git:
+
+```bash
+bash android/build.sh          # -> dist/medo.apk
+bash android/test.sh           # pure-Java logic tests on the desktop JVM
+```
+
+`versionCode`/`versionName` are read from `android/AndroidManifest.xml` and the
+code is bumped after a successful build, so an update installs over the old app.
+`android/medo-debug.keystore` must exist — the same key is required to update an
+installed app; back it up with `medo keystore-backup` (it never enters git).
+
+### رساندن بانک به گوشی
+
+```bash
+python -m medo.cli build-bank                    # whole bank, no images
+python -m medo.cli build-bank -c 12 -c 15        # only those categories
+python -m medo.cli build-bank --images           # embed small WebP mind-maps
+python -m medo.cli share                         # or over Wi-Fi, read-only
+```
+
+The `.medo` file is a **zip**: `index.json` (tree, counts, one light entry per
+question) and `chunks/<category>.json` with the lesson bodies. The app reads the
+index first and streams each chunk straight out of the archive, so a large Pro
+bank never sits in memory three times over. Banks built by older versions (one
+JSON document) still open.
+
+In the app: **دریافت بانک → از فایل** (or **دریافت از وای‌فای**). Over USB,
+`adb reverse tcp:8765 tcp:8765` makes the Wi-Fi address reachable at
+`127.0.0.1`.
+
+---
+
+## وقتی چیزی کار نمی‌کند
+
+Run `medo doctor` first. It answers with one of three verdicts:
+
+* **«آماده استخراج»** — the path and session are fine.
+* **«نشست منقضی شده؛ دوباره وارد شو»** — run `login` again; downloads pause
+  instead of continuing as a guest.
+* **«اختلال در مسیر شبکه یا فیلترشکن»** — a dead Windows proxy, a fake-IP DNS
+  answer that the tunnel does not carry, or TLS being reset.
+
+You do **not** have to switch the VPN off for every download: in the VPN client
+(v2rayN, Nekoray, Clash, Hiddify) add `domain:medofast.ir` and `geosite:ir` to
+the DIRECT/bypass rules. The scraper browser already runs with
+`--no-proxy-server`.
+
+A `429` is the site's rate limit, not your internet: stop, wait 15–30 minutes,
+then resume — the cursor is kept.
+
+If the Android build says the signing key is missing, restore
+`android/medo-debug.keystore`; creating a new key installs a second app instead
+of updating the first.
+
+---
+
+## داده‌ها و حریم خصوصی
+
+* `data/` — SQLite archive, session, diagnostics. **Never committed.**
+* Scraped pages in `data/diag/` contain paid lesson text. Never commit them,
+  never paste their text into an issue or a commit message.
+* `dist/`, `build/` — generated bundles, PDF, APK. Not committed.
+* `tools/`, `.venv/` — local toolchains (~600 MB). Not committed.
+* The app never bypasses a login, a quota or a paywall: explanations come from
+  the account you logged in with, at the site's own pace.
+
+---
+
+## ساختار پروژه
+
+```
+medo/                Python package (CLI, server, scraper, parser, DB, export)
+medo/web/            Local web UI (no CDN: fonts, icons and JS are bundled)
+medo/templates/      Jinja template for the printed book
+android/src/         Dependency-free Java app
+android/tests/       JVM logic tests (TestMain)
+scripts/             One-off diagnostics and dev helpers
+tests/               pytest suite + shared fixtures
+```
+
+Read [`AGENTS.md`](AGENTS.md) before changing code (smallest complete change,
+stdlib first, Persian UI), [`PROMPT.md`](PROMPT.md) for the full project brief
+and every bug fixed so far, and [`NOTES.md`](NOTES.md) for the chronological
+evidence.
+
+## آزمون‌ها
+
+```bash
+pytest -q                # Python: parser, DB, server, export, bundle, PDF HTML
+node --check medo/web/app.js
+node --check medo/web/normalize.js
+bash android/test.sh     # Java logic on the desktop JVM
+```
+
+`tests/conftest.py` generates the synthetic MHTML fixtures when they are absent,
+so a clean clone needs no extra step. Real captures are never generated; tests
+that need one skip themselves.
