@@ -141,3 +141,140 @@ def test_save_marks_the_row_as_login_and_keeps_the_votes(tmp_path):
     assert saved["correct_index"] == 2
     assert saved["vote_percent"].get("1") == 80
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Repair safety: never trade a stored lesson for a worse one, keep a backup
+# ---------------------------------------------------------------------------
+
+def _fake_page(text, status, correct=3, stem="سوال", options=None):
+    """What a repair sees when a page comes back empty, locked or stubbed."""
+    from medo.models import ParsedQuestion
+
+    options = options or ("گزینه یک", "گزینه دو", "گزینه سه", "گزینه چهار")
+    return ParsedQuestion(
+        source_url="", source_page=4, ordinal=4,
+        stem_html=f"<p>{stem}</p>", stem_text=stem,
+        options=[ParsedOption(index=i + 1, text=t, raw_html="")
+                 for i, t in enumerate(options)],
+        correct_index=correct, site_question_id=1473,
+        answer_source=AnswerSource.MARKER if correct else AnswerSource.UNKNOWN,
+        explanation_html=f"<div>{text}</div>" if text else None,
+        explanation_text=text,
+        explanation_status=status,
+    )
+
+
+def _stored_full(conn, text="درس‌نامهٔ کامل و بلند " * 20, site_id=1473):
+    """Store one question the way a good Pro pass leaves it."""
+    q = _question("سوال با درس‌نامه", 2)
+    q.site_question_id = site_id
+    q.explanation_text = text
+    q.explanation_html = f"<div>{text}</div>"
+    q.explanation_status = ExplanationStatus.FULL
+    qid = upsert_question(conn, q, topic_id=83, fetched_as="login")
+    row = dict(conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone())
+    return qid, row, text
+
+
+def test_repair_keeps_a_full_lesson_when_the_page_returns_nothing(tmp_path):
+    """An empty or locked page must not erase what the account already has."""
+    from medo import answer_audit
+    from medo.db import get_question_by_id
+
+    for text, status in ((None, ExplanationStatus.UNKNOWN),
+                         (None, ExplanationStatus.LOCKED),
+                         ("کوتاه", ExplanationStatus.FULL)):
+        conn = get_connection(tmp_path / f"medo-{status.value}-{bool(text)}.db")
+        init_db(conn)
+        qid, row, stored = _stored_full(conn)
+        info = answer_audit._save(conn, row, _fake_page(text, status))
+        saved = get_question_by_id(conn, qid)
+        assert saved["explanation_text"] == stored
+        assert saved["explanation_status"] == "full"
+        assert info["explanation_kept"] is True
+        conn.close()
+
+
+def test_repair_accepts_a_full_lesson_that_is_at_least_as_long(tmp_path):
+    from medo import answer_audit
+    from medo.db import get_question_by_id
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    qid, row, stored = _stored_full(conn)
+    longer = stored + " و این هم ادامهٔ درس است."
+    info = answer_audit._save(conn, row, _fake_page(longer, ExplanationStatus.FULL))
+    saved = get_question_by_id(conn, qid)
+    assert saved["explanation_text"] == longer
+    assert info["explanation_kept"] is False
+    conn.close()
+
+
+def test_refresh_text_rewrites_wording_but_not_identity(tmp_path):
+    """A page matched by site id may refresh the text; the hash must not move."""
+    from medo import answer_audit
+    from medo.db import get_question_by_id
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    qid, row, stored = _stored_full(conn)
+    old_hash = row["content_hash"]
+    page = _fake_page(stored, ExplanationStatus.FULL,
+                      stem="سوال با متن تازه", options=("الف", "ب", "ج", "د"))
+
+    info = answer_audit._save(conn, row, page, refresh_text=True)
+    saved = get_question_by_id(conn, qid)
+    assert info["text_updated"] is True
+    assert saved["stem_text"] == "سوال با متن تازه"
+    assert "متن تازه" in saved["stem_html"]
+    assert [o["text"] for o in saved["options"]] == ["الف", "ب", "ج", "د"]
+    assert saved["content_hash"] == old_hash
+    assert saved["site_question_id"] == 1473
+    conn.close()
+
+
+def test_signature_match_does_not_rewrite_the_text(tmp_path):
+    """Without the site id the match is a guess; leave the wording alone."""
+    from medo import answer_audit
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    qid, row, stored = _stored_full(conn)
+    page = _fake_page(stored, ExplanationStatus.FULL, stem="متن دیگر")
+
+    info = answer_audit._save(conn, row, page, refresh_text=False)
+    saved = dict(conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone())
+    assert info["text_updated"] is False
+    assert saved["stem_text"] == "سوال با درس‌نامه"
+    conn.close()
+
+
+def test_backup_is_one_copy_per_process_and_prunes_the_oldest(tmp_path):
+    from medo import backup
+
+    backup.reset_backup_guard()
+    db = tmp_path / "data" / "medo.db"
+    db.parent.mkdir(parents=True)
+    conn = get_connection(db)
+    init_db(conn)
+    upsert_question(conn, _question("سوال پشتیبان", 1), topic_id=83)
+    conn.close()
+
+    copy = backup.backup_database(db)
+    assert copy is not None and copy.is_file()
+    assert copy.parent.name == "backups"
+    check = get_connection(copy)
+    assert check.execute("SELECT count(*) FROM questions").fetchone()[0] == 1
+    check.close()
+    # The second call in the same process is a no-op.
+    assert backup.backup_database(db) is None
+
+    # Six older copies: the oldest is dropped, the newest five stay.
+    for day in range(6):
+        (copy.parent / f"medo-2026010{day + 1}-0100.db").write_bytes(b"old")
+    backup._prune(copy.parent, "medo", 5)
+    names = sorted(p.name for p in copy.parent.glob("medo-*.db"))
+    assert "medo-20260101-0100.db" not in names
+    assert len(names) == 5
+    backup.reset_backup_guard()

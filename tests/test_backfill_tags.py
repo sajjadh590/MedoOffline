@@ -168,3 +168,41 @@ def test_subtopic_targets_follow_the_tree_order(tmp_path):
         (1470, "اول"), (1500, "دوم")]
     assert subtopic_targets(conn, 79) == []
     conn.close()
+
+
+def test_ambiguous_signature_uses_the_stored_page_as_a_tie_breaker(backfill, tmp_path):
+    """Identical options on two pages: the stored page decides, nothing else."""
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    first = _question("سوال الف")
+    first.source_page = 3
+    second = _question("سوال ب")               # same 4 option texts
+    second.source_page = 9
+    upsert_question(conn, first, topic_id=78)
+    second_id = upsert_question(conn, second, topic_id=78)
+    bank = backfill.load_bank(conn, 78)
+
+    parsed = _question("سوال الف")
+    parsed.site_question_id = 1473             # the page itself exposes the id
+    assert backfill.match_question_on_page(conn, parsed, bank, 78, 9) == (
+        second_id, "signature+page")
+
+    # A page no stored row claims is still ambiguous, not a guess.
+    question_id, why = backfill.match_question_on_page(conn, parsed, bank, 78, 4)
+    assert question_id is None
+    assert why.startswith("ambiguous")
+    conn.close()
+
+
+def test_site_id_wins_over_the_page_tie_breaker(backfill, tmp_path):
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    q = _question("سوال الف")
+    q.site_question_id = 1473
+    qid = upsert_question(conn, q, topic_id=78)
+
+    parsed = _question("سوال الف")
+    parsed.site_question_id = 1473
+    assert backfill.match_question_on_page(
+        conn, parsed, backfill.load_bank(conn, 78), 78, 5) == (qid, "site")
+    conn.close()

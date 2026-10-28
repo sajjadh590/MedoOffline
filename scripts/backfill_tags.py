@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT))
 from medo.auth import DEFAULT_STORAGE_STATE, has_storage_state  # noqa: E402
 from medo.browser import launch_browser, new_context  # noqa: E402
 from medo.db import (  # noqa: E402
+    DEFAULT_DB_PATH,
     count_node_questions,
     get_connection,
     get_tag_sync_state,
@@ -311,6 +312,36 @@ def map_subtopics(conn, page, topic_id: int, args, delay: float, stats: dict) ->
     return True
 
 
+def row_is_on_page(conn, question_id: int, topic_id: int,
+                   page_no: int) -> bool:
+    """True when this stored row claims to come from that topic page."""
+    row = conn.execute(
+        "SELECT topic_id, source_page FROM questions WHERE id = ?",
+        (int(question_id),)).fetchone()
+    return bool(row) and int(row["topic_id"] or 0) == int(topic_id) \
+        and int(row["source_page"] or 0) == int(page_no)
+
+
+def match_question_on_page(conn, parsed, by_signature: dict[str, list[int]],
+                           topic_id: int, page_no: int):
+    """(question id, how), using the stored page when options collide.
+
+    Two questions can legitimately share four one-word answers.  The page
+    being read knows where it is, so a single row that claims the same
+    (topic, page) is accepted; a still-ambiguous page is never guessed.
+    """
+    question_id, how = match_question(conn, parsed, by_signature)
+    if question_id is not None or not how.startswith("ambiguous"):
+        return question_id, how
+    if not parsed.options:
+        return question_id, how
+    on_page = [qid for qid in by_signature.get(signature(parsed.options)) or []
+               if row_is_on_page(conn, qid, topic_id, page_no)]
+    if len(on_page) == 1:
+        return on_page[0], "signature+page"
+    return None, how
+
+
 def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) -> None:
     """Give old rows their site id by re-reading the pages they came from.
 
@@ -318,6 +349,12 @@ def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) ->
     covered by the subtopic pass.  The match is still the option signature, so
     a row whose options changed upstream is left alone instead of receiving a
     wrong id.
+
+    Identical options are common (two questions about the same drug can share
+    four one-word answers).  Instead of skipping those pages, the stored
+    (topic, page) is used as a tie-breaker: the row must say it came from the
+    page being read, otherwise the id is not written and the page is counted
+    as ambiguous.
     """
     rows = conn.execute(
         "SELECT DISTINCT source_page FROM questions WHERE topic_id = ? "
@@ -335,8 +372,14 @@ def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) ->
             payload.get("html") or "", submitted=False, source_url="",
             source_page=page_no, ordinal=page_no)
         site_id = getattr(parsed, "site_question_id", None)
-        question_id, how = match_question(conn, parsed, by_signature)
-        if question_id is None or not site_id:
+        question_id, how = match_question_on_page(
+            conn, parsed, by_signature, topic_id, page_no)
+        if question_id is None:
+            if how.startswith("ambiguous"):
+                stats["ambiguous"] += 1
+            stats["id_skipped"] += 1
+            continue
+        if not site_id:
             stats["id_skipped"] += 1
             continue
         if not args.dry_run:
@@ -396,6 +439,15 @@ def main() -> int:
         return 1
 
     from playwright.sync_api import sync_playwright
+
+    # A repair/backfill rewrites stored rows; keep one copy of the archive
+    # first (once per process, newest 5 kept).
+    if not args.dry_run:
+        from medo.backup import backup_database
+
+        copy = backup_database(args.db or DEFAULT_DB_PATH)
+        if copy:
+            print(f"[i] backup: {copy.name}")
 
     stats = {"mapped": 0, "ambiguous": 0, "no_options": 0,
              "skipped_done": 0, "id_filled": 0, "id_skipped": 0}
@@ -459,7 +511,8 @@ def main() -> int:
         print("    the cursor resumes at the exact page of each subtopic.")
     if args.site_ids:
         print(f"\n[done] site ids filled: {stats['id_filled']}, "
-              f"skipped: {stats['id_skipped']}")
+              f"skipped: {stats['id_skipped']} "
+              f"(ambiguous on page: {stats['ambiguous']})")
     else:
         print(f"\n[done] mapped {stats['mapped']} question(s)"
               + (f", {stats['skipped_done']} subtopic(s) already complete"

@@ -710,6 +710,12 @@ class ScraperTaskController:
             self._push(verdict)
             applog.log(f"[doctor] {job} blocked: {verdict}")
             return False, verdict
+        # One consistent copy per session before anything can overwrite rows.
+        from medo.backup import backup_database
+
+        copy = backup_database(db_path)
+        if copy:
+            self._push(f"نسخهٔ پشتیبان بانک: {copy.name}")
         return self._take_slot(job, message, db_path)
 
     def _rebuild_after_repair(self, db_path) -> None:
@@ -772,6 +778,10 @@ class ScraperTaskController:
                     f"پایان ترمیم: {res['found']} سوال کامل شد، "
                     f"{res['still_missing']} سوال هنوز پاسخ/درس‌نامه کم دارد"
                     + (f" ({res['skipped']} صفحه پیدا نشد)" if res["skipped"] else "")
+                    + (f"؛ {res.get('texts_updated', 0)} متن به‌روز شد"
+                       if res.get("texts_updated") else "")
+                    + (f"؛ {res.get('kept_old', 0)} درس‌نامهٔ کامل دست‌نخورده ماند"
+                       if res.get("kept_old") else "")
                     + (f"؛ {remaining} سوال در صف مانده." if remaining else ".")
                 )
                 if res["found"]:

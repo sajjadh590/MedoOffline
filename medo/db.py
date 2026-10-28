@@ -656,8 +656,9 @@ def questions_needing_repair(
     """The repair queue, oldest first, with what it takes to re-locate a page."""
     sql = (
         "SELECT id, topic_id, tag_id, site_question_id, source_page, ordinal, "
-        "       stem_text, options_json, correct_index, explanation_html, "
-        "       explanation_text, explanation_status, fetched_as "
+        "       stem_html, stem_text, options_json, correct_index, "
+        "       explanation_html, explanation_text, explanation_status, "
+        "       fetched_as "
         f"FROM questions WHERE {NEEDS_REPAIR_SQL} ORDER BY id"
     )
     args: list = []
