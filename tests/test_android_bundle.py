@@ -104,11 +104,13 @@ def test_stats_match_the_questions(seeded_db):
 def test_question_carries_every_field_the_app_parses(seeded_db):
     q = build_android_bundle(seeded_db)["questions"][0]
     assert set(q) == {
-        "id", "topic_id", "tag_id", "source_url", "page", "ordinal",
+        "id", "topic_id", "tag_id", "nodes", "source_url", "page", "ordinal",
         "stem_html", "stem_text", "options", "correct", "answer_source",
         "votes", "explanation_html", "explanation_text", "explanation_status",
         "has_images", "path", "bookmarked", "selected",
     }
+    # The phone needs every node, not only the primary pair.
+    assert q["nodes"] and q["nodes"][0]["topic_id"] == q["topic_id"]
     assert q["options"][0] == {"index": 1, "text": "گزینه 1"}
     assert q["correct"] == 2
     assert q["stem_text"] == "بیمار ۶۰ ساله با تاکی‌کاردی"

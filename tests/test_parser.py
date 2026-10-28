@@ -627,3 +627,43 @@ class TestLockDetection:
         q = parse_question_html(
             _explanation_page("متن کوتاه", denied=True), submitted=True)
         assert q.explanation_status == ExplanationStatus.LOCKED
+
+
+# ---------------------------------------------------------------------------
+# #question-meta: the site's own, stable question id
+# ---------------------------------------------------------------------------
+
+class TestSiteQuestionId:
+    """De-duplication and repairs need an id that survives a re-download.
+
+    F1: data-pqrfhskdjf is the site question id (Pro Q53 = 1473, the same
+    question in the free capture = 1473); its neighbours are the topic id, the
+    page number and the option count, and one per-load token.
+    """
+
+    @staticmethod
+    def _with_meta(attrs: str) -> str:
+        return _live_page(_REVEALED_STEM).replace(
+            '<div id="block-b">',
+            f'<div id="question-meta" {attrs}></div>\n    <div id="block-b">',
+        )
+
+    def test_named_attribute_is_read(self):
+        q = parse_question_html(
+            self._with_meta('data-pqrfhskdjf="1473" data-kjfhgdsa="15" '
+                            'data-mnbvcxza="1" data-defhskdjfh="4"'),
+            source_url="/qbank/topic-id-15", source_page=1)
+        assert q.site_question_id == 1473
+
+    def test_fallback_takes_the_id_beside_the_topic_id(self):
+        # The names changed upstream: only positions are left as a signal.
+        q = parse_question_html(
+            self._with_meta('data-aaa="15" data-bbb="1473" data-ccc="4" '
+                            'data-ddd="1"'),
+            source_url="/qbank/topic-id-15", source_page=1)
+        assert q.site_question_id == 1473
+
+    def test_missing_meta_is_none_not_a_guess(self):
+        q = parse_question_html(_live_page(_REVEALED_STEM),
+                                source_url="/qbank/topic-id-15", source_page=1)
+        assert q.site_question_id is None

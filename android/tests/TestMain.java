@@ -37,6 +37,7 @@ public final class TestMain {
         quizFlow();
         urlParsing();
         taggedCounts();
+        sharedQuestionNodes();
         scanTargets();
         qrDecoding();
         subtopicsAndAnswers();
@@ -440,6 +441,45 @@ public final class TestMain {
         eq("nothing above the root", null, bank.nearestWithQuestions(null));
     }
 
+    /** One question can sit in the whole topic and two subtopics at once. */
+    private static void sharedQuestionNodes() {
+        String shared = "{\"id\":1,\"topic_id\":9,\"tag_id\":5,"
+                + "\"nodes\":[{\"topic_id\":9,\"tag_id\":0},"
+                + "{\"topic_id\":9,\"tag_id\":5},{\"topic_id\":9,\"tag_id\":6}],"
+                + "\"source_url\":\"/qbank/topic-id-9?tag=5\",\"page\":1,\"ordinal\":1,"
+                + "\"stem_html\":\"<p>س</p>\",\"stem_text\":\"س\","
+                + "\"options\":[{\"index\":1,\"text\":\"الف\"},"
+                + "{\"index\":2,\"text\":\"ب\"}],"
+                + "\"correct\":1,\"answer_source\":\"color\"}";
+        String single = "{\"id\":2,\"topic_id\":9,\"tag_id\":5,"
+                + "\"nodes\":[{\"topic_id\":9,\"tag_id\":5}],"
+                + "\"source_url\":\"/qbank/topic-id-9?tag=5\",\"page\":1,\"ordinal\":2,"
+                + "\"stem_html\":\"<p>س</p>\",\"stem_text\":\"س\","
+                + "\"options\":[{\"index\":1,\"text\":\"الف\"},"
+                + "{\"index\":2,\"text\":\"ب\"}],"
+                + "\"correct\":1,\"answer_source\":\"color\"}";
+        String json = "{\"format\":\"medo-bank\",\"version\":1,\"generated_at\":\"\","
+                + "\"stats\":{\"total\":2,\"with_answer\":2},"
+                + "\"tree\":[{\"id\":1,\"parent_id\":null,\"kind\":\"topic\","
+                + "\"title\":\"مبحث\",\"source_url\":\"/qbank/topic-id-9\",\"position\":1,"
+                + "\"question_count\":2,\"children\":["
+                + "{\"id\":2,\"parent_id\":1,\"kind\":\"subtopic\",\"title\":\"الف\","
+                + "\"source_url\":\"/qbank/topic-id-9?tag=5\",\"position\":1,"
+                + "\"question_count\":2,\"children\":[]},"
+                + "{\"id\":3,\"parent_id\":1,\"kind\":\"subtopic\",\"title\":\"ب\","
+                + "\"source_url\":\"/qbank/topic-id-9?tag=6\",\"position\":2,"
+                + "\"question_count\":1,\"children\":[]}]}],"
+                + "\"questions\":[" + shared + "," + single + "]}";
+        Bank bank = Bank.parse(json);
+        Node topic = bank.roots.get(0);
+        eq("shared question counts once for its topic", 2, bank.countFor(topic));
+        eq("first subtopic sees both", 2, bank.countFor(topic.children.get(0)));
+        eq("second subtopic sees the shared one", 1, bank.countFor(topic.children.get(1)));
+        eq("topic list has both", 2, bank.forNode(topic).size());
+        eq("second slice has one", 1, bank.forNode(topic.children.get(1)).size());
+        eq("question keeps all nodes", 3, bank.questions.get(0).nodes.size());
+    }
+
     private static String question(int id, int tag) {
         return "{\"id\":" + id + ",\"topic_id\":9,\"tag_id\":" + tag + ","
                 + "\"source_url\":\"/qbank/topic-id-9?tag=" + tag + "\",\"page\":1,"
@@ -480,7 +520,13 @@ public final class TestMain {
                 int topic = Bank.topicId(leaf.sourceUrl);
                 boolean onlyOwnTopic = true;
                 for (Question q : subset) {
-                    if (q.topicId != topic) {
+                    boolean inTopic = false;
+                    for (int[] n : q.nodes) {
+                        if (n[0] == topic) {
+                            inTopic = true;
+                        }
+                    }
+                    if (!inTopic) {
                         onlyOwnTopic = false;
                     }
                 }

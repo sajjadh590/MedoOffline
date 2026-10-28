@@ -21,6 +21,10 @@ public final class Question {
     public final int id;
     public final int topicId;
     public final int tagId;          // 0 when the question belongs to the whole topic
+    /** Every node this question sits in: {topicId, tagId}.  A question can be
+     *  reachable through its topic and several «?tag=» subtopics at once; the
+     *  single topicId/tagId pair above is only the first one. */
+    public final List<int[]> nodes;
     public final String sourceUrl;
     public final int page;
     public final int ordinal;
@@ -44,6 +48,19 @@ public final class Question {
         this.id = MiniJson.integer(m, "id", 0);
         this.topicId = MiniJson.integer(m, "topic_id", 0);
         this.tagId = MiniJson.integer(m, "tag_id", 0);
+        List<int[]> nodeList = new ArrayList<>();
+        for (Object raw : MiniJson.asList(m.get("nodes"))) {
+            Map<String, Object> n = MiniJson.asMap(raw);
+            int nodeTopic = MiniJson.integer(n, "topic_id", 0);
+            if (nodeTopic > 0) {
+                nodeList.add(new int[]{nodeTopic, MiniJson.integer(n, "tag_id", 0)});
+            }
+        }
+        if (nodeList.isEmpty() && this.topicId > 0) {
+            // A bundle written before question_nodes only has the one pair.
+            nodeList.add(new int[]{this.topicId, Math.max(0, this.tagId)});
+        }
+        this.nodes = nodeList;
         this.sourceUrl = MiniJson.str(m, "source_url", "");
         this.page = MiniJson.integer(m, "page", 0);
         this.ordinal = MiniJson.integer(m, "ordinal", 0);

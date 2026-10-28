@@ -54,14 +54,22 @@ public final class Bank {
             Question q = Question.from(MiniJson.asMap(raw));
             questions.add(q);
             byId.put(q.id, q);
-            if (q.topicId > 0) {
-                if (q.tagId > 0) {
-                    Long k = key(q.topicId, q.tagId);
+            // A question can sit in several subtopics of the same topic; it
+            // counts once per topic badge and once per subtopic badge.
+            Set<Integer> seenTopics = new HashSet<>();
+            for (int[] node : q.nodes) {
+                if (node[0] <= 0) {
+                    continue;
+                }
+                if (node[1] > 0) {
+                    Long k = key(node[0], node[1]);
                     Integer seen = perTag.get(k);
                     perTag.put(k, seen == null ? 1 : seen + 1);
                 }
-                Integer n = perTopic.get(q.topicId);
-                perTopic.put(q.topicId, n == null ? 1 : n + 1);
+                if (seenTopics.add(node[0])) {
+                    Integer n = perTopic.get(node[0]);
+                    perTopic.put(node[0], n == null ? 1 : n + 1);
+                }
             }
         }
         for (Node top : roots) {
@@ -114,13 +122,12 @@ public final class Bank {
         collectKeys(node, wholeTopics, tagged);
         List<Question> out = new ArrayList<>();
         for (Question q : questions) {
-            if (q.topicId <= 0) {
-                continue;
-            }
-            if (wholeTopics.contains(q.topicId)) {
-                out.add(q);
-            } else if (q.tagId > 0 && tagged.contains(key(q.topicId, q.tagId))) {
-                out.add(q);
+            for (int[] n : q.nodes) {
+                if (wholeTopics.contains(n[0])
+                        || (n[1] > 0 && tagged.contains(key(n[0], n[1])))) {
+                    out.add(q);
+                    break;
+                }
             }
         }
         return out;

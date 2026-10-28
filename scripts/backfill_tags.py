@@ -11,8 +11,9 @@ looks empty.
 This script walks the filtered pages of one topic, reads each question's
 options (the stem is encrypted until the page's JS runs, but options are
 plain), and matches it to the stored question by an option signature.  It only
-writes ``tag_id``/``subtopic_title``; stems, answers and progress stay
-untouched, and nothing is downloaded twice.
+adds a ``question_nodes`` row (plus the legacy ``tag_id``/``subtopic_title``
+when they are still empty); stems, answers and progress stay untouched, and
+nothing is downloaded twice.
 
 Usage
 -----
@@ -38,7 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 from medo.auth import DEFAULT_STORAGE_STATE, has_storage_state  # noqa: E402
 from medo.browser import new_context  # noqa: E402
-from medo.db import get_connection  # noqa: E402
+from medo.db import count_node_questions, get_connection  # noqa: E402
 from medo.netfix import resolve_public_ip  # noqa: E402
 from medo.parser import parse_question_html, _clean_text  # noqa: E402
 
@@ -159,9 +160,7 @@ def _wait_after_throttle(retry_after, pause: float, attempt: int) -> float:
 
 def tagged_count(conn, topic_id: int, tag_id: int) -> int:
     """Questions already mapped to this subtopic."""
-    return int(conn.execute(
-        "SELECT count(*) FROM questions WHERE topic_id = ? AND tag_id = ?",
-        (int(topic_id), int(tag_id))).fetchone()[0])
+    return count_node_questions(conn, int(topic_id), int(tag_id))
 
 
 def main() -> int:
@@ -212,7 +211,6 @@ def main() -> int:
         print(f"[i] system DNS is fake; pinned medofast.ir -> {ip}")
 
     mapped_total = 0
-    skipped_ambiguous = 0
     skipped_done = 0
     stopped_early = None
     leftovers: list[dict] = []
@@ -252,9 +250,10 @@ def main() -> int:
                 subs = subtopics(conn, topic_id)
                 print(f"\n[topic {topic_id}] {len(bank)} question signature(s), "
                       f"{len(subs)} subtopic(s)")
-                progress = conn.execute(
-                    "SELECT count(*) FROM questions WHERE topic_id = ? AND tag_id IS NOT NULL",
-                    (topic_id,)).fetchone()[0]
+                progress = int(conn.execute(
+                    "SELECT count(DISTINCT n.question_id) FROM question_nodes n "
+                    "WHERE n.topic_id = ? AND n.tag_id > 0", (topic_id,)
+                ).fetchone()[0] or 0)
                 print(f"  already tagged: {progress}")
 
                 assignments: dict[int, dict] = {}
@@ -265,30 +264,37 @@ def main() -> int:
                     The whole-topic commit meant a 429 on subtopic 4 discarded
                     the mapping of subtopics 1-3, and the next run paid for
                     them again.
+
+                    Membership goes into question_nodes: a question that sits
+                    in two subtopics keeps both (questions.tag_id could hold
+                    only one, so the second used to be dropped as a
+                    «conflict»).
                     """
-                    nonlocal mapped_total, skipped_ambiguous
+                    nonlocal mapped_total
                     updates = 0
-                    conflicts = 0
                     for question_id in ids:
                         payload = assignments[question_id]
-                        row = conn.execute(
-                            "SELECT tag_id FROM questions WHERE id = ?",
-                            (question_id,)
-                        ).fetchone()
-                        if row and row["tag_id"] not in (None, payload["tag_id"]):
-                            conflicts += 1
-                            continue
                         updates += 1
-                        if not args.dry_run:
-                            conn.execute(
-                                "UPDATE questions SET tag_id = ?, "
-                                "subtopic_title = ?, "
-                                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                                (payload["tag_id"], payload["title"], question_id))
+                        if args.dry_run:
+                            continue
+                        conn.execute(
+                            "INSERT OR IGNORE INTO question_nodes "
+                            "(question_id, topic_id, tag_id, subtopic_title) "
+                            "VALUES (?, ?, ?, ?)",
+                            (question_id, int(topic_id), payload["tag_id"],
+                             payload["title"]),
+                        )
+                        # Old single-parent column: the first tag wins, so a
+                        # reader that has not moved to nodes stays stable.
+                        conn.execute(
+                            "UPDATE questions SET "
+                            "  tag_id = CASE WHEN tag_id IS NULL THEN ? ELSE tag_id END, "
+                            "  subtopic_title = coalesce(subtopic_title, ?), "
+                            "  updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                            (payload["tag_id"], payload["title"], question_id))
                     if not args.dry_run:
                         conn.commit()
                     mapped_total += updates
-                    skipped_ambiguous += conflicts
 
                 for sub in subs:
                     total_pages = 0
@@ -345,9 +351,15 @@ def main() -> int:
         stopped_early = exc
     finally:
         try:
+            # «Without a subtopic» = no subtopic node in its own topic, which
+            # is exact even when the same question is tagged elsewhere.
             leftovers = [dict(r) for r in conn.execute(
-                "SELECT topic_id, count(*) AS n FROM questions "
-                "WHERE tag_id IS NULL GROUP BY topic_id ORDER BY n DESC")]
+                "SELECT q.topic_id, count(*) AS n FROM questions q "
+                "WHERE q.topic_id IS NOT NULL "
+                "  AND NOT EXISTS (SELECT 1 FROM question_nodes x "
+                "                  WHERE x.question_id = q.id "
+                "                    AND x.topic_id = q.topic_id AND x.tag_id > 0) "
+                "GROUP BY q.topic_id ORDER BY n DESC")]
         except Exception:
             leftovers = []
         conn.close()
@@ -357,7 +369,6 @@ def main() -> int:
         print("    Whatever was mapped before that is saved; run again later —")
         print("    subtopics that already finished are skipped, so it continues.")
     print(f"\n[done] mapped {mapped_total} question(s)"
-          + (f", skipped {skipped_ambiguous} conflict(s)" if skipped_ambiguous else "")
           + (f", {skipped_done} subtopic(s) already complete" if skipped_done else ""))
     if leftovers and not args.dry_run:
         print("[i] questions still without a subtopic:")

@@ -43,7 +43,7 @@ DEFAULT_SHARE_PORT = 8765
 # (content_hash, download_bytes, ...) that the app has no use for, and a smaller
 # bundle is a faster Wi-Fi import on a slow link.
 _QUESTION_FIELDS = (
-    "id", "topic_id", "tag_id", "source_url", "page", "ordinal",
+    "id", "topic_id", "tag_id", "nodes", "source_url", "page", "ordinal",
     "stem_html", "stem_text", "options", "correct", "answer_source", "votes",
     "explanation_html", "explanation_text", "explanation_status",
     "has_images", "path", "bookmarked", "selected",
@@ -62,10 +62,16 @@ def _clean_question(row: dict) -> dict:
             options.append({"index": int(opt["index"]), "text": str(opt.get("text") or "")})
         except (KeyError, TypeError, ValueError):
             continue
+    # Every node the question was reached through ({topic_id, tag_id}); the
+    # single topic_id/tag_id pair below stays for older phone builds, which
+    # read it as the primary node.
+    nodes = [{"topic_id": int(n["topic_id"]), "tag_id": int(n.get("tag_id") or 0)}
+             for n in (row.get("nodes") or []) if n.get("topic_id")]
     return {
         "id": int(row["id"]),
         "topic_id": row.get("topic_id"),
         "tag_id": row.get("tag_id"),
+        "nodes": nodes,
         "source_url": row.get("source_url") or "",
         "page": row.get("source_page") or 0,
         "ordinal": row.get("ordinal") or 0,

@@ -27,6 +27,8 @@ from medo.db import (
     get_database_stats,
     get_question_by_id,
     clear_run_request,
+    count_node_questions,
+    count_untagged_questions,
     declared_questions,
     get_scrape_state,
     get_target_state,
@@ -810,9 +812,7 @@ class ScraperTaskController:
             try:
                 if not tag_id:
                     return 0, "", 0
-                n = int(conn.execute(
-                    "SELECT count(*) FROM questions WHERE topic_id = ? AND tag_id = ?",
-                    (int(topic_id), int(tag_id))).fetchone()[0])
+                n = count_node_questions(conn, int(topic_id), int(tag_id))
                 state = get_target_state(conn, topic_id, tag_id) or {}
                 declared = declared_questions(conn, int(topic_id), int(tag_id))
                 return n, str(state.get("status") or ""), int(declared or 0)
@@ -911,16 +911,7 @@ class ScraperTaskController:
                     declared = declared_questions(conn, tid, tag)
                     if declared <= 0:
                         continue
-                    if tag is not None:
-                        stored = conn.execute(
-                            "SELECT count(*) FROM questions "
-                            "WHERE topic_id = ? AND tag_id = ?", (tid, tag)
-                        ).fetchone()[0]
-                    else:
-                        stored = conn.execute(
-                            "SELECT count(*) FROM questions WHERE topic_id = ?",
-                            (tid,)
-                        ).fetchone()[0]
+                    stored = count_node_questions(conn, tid, tag)
                     expected += max(declared - int(stored or 0), 0)
             finally:
                 conn.close()
@@ -1339,9 +1330,9 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
                 missing = conn.execute(
                     "SELECT count(*) FROM questions WHERE correct_index IS NULL"
                 ).fetchone()[0]
-                untagged = conn.execute(
-                    "SELECT count(*) FROM questions WHERE tag_id IS NULL"
-                ).fetchone()[0]
+                # A question counts as classified when ANY node of it is a
+                # subtopic; the old question.tag_id column holds only one.
+                untagged = count_untagged_questions(conn)
                 subtopics = conn.execute(
                     "SELECT count(*) FROM categories WHERE source_url LIKE '%?tag=%'"
                 ).fetchone()[0]

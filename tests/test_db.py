@@ -375,6 +375,100 @@ def test_usage_summary_is_zero_until_something_is_measured(conn):
     assert summary["today_bytes"] == 0
 
 
+# ---------------------------------------------------------------------------
+# Stable site id + many-to-many question_nodes
+# ---------------------------------------------------------------------------
+
+def test_site_id_is_the_identity_when_the_stem_changes(conn):
+    """A stem edited upstream changes the hash, not the question."""
+    q = make_dummy_question(1)
+    q.site_question_id = 1473
+    qid = upsert_question(conn, q, topic_id=15)
+
+    edited = make_dummy_question(1, stem="بیمار دیابتی با درد سینهٔ تیپیک")
+    edited.site_question_id = 1473
+    edited.compute_content_hash()
+    assert edited.content_hash != q.content_hash
+
+    assert upsert_question(conn, edited, topic_id=15) == qid
+    assert get_database_stats(conn)["total_questions"] == 1
+    stored = get_question_by_id(conn, qid)
+    assert stored["stem_text"] == edited.stem_text
+    assert stored["site_question_id"] == 1473
+
+
+def test_a_question_keeps_every_subtopic_it_was_read_through(conn):
+    """Top and tag both stay; the old column keeps the first tag."""
+    from medo.db import count_node_questions, get_question_nodes
+
+    q = make_dummy_question(1)
+    q.site_question_id = 1473
+    qid = upsert_question(conn, q, topic_id=15, tag_id=52,
+                          subtopic_title="نارسایی قلبی")
+
+    again = make_dummy_question(1)
+    again.site_question_id = 1473
+    assert upsert_question(conn, again, topic_id=15, tag_id=61,
+                           subtopic_title="آریتمی") == qid
+
+    nodes = get_question_nodes(conn, qid)
+    assert {(n["topic_id"], n["tag_id"]) for n in nodes} == {(15, 52), (15, 61)}
+    assert count_node_questions(conn, 15) == 1        # counted once for the topic
+    assert count_node_questions(conn, 15, 52) == 1
+    assert count_node_questions(conn, 15, 61) == 1
+    assert get_question_by_id(conn, qid)["tag_id"] == 52
+
+
+def test_category_progress_counts_a_shared_question_once(conn):
+    from medo.db import get_category_progress, upsert_category
+
+    upsert_category(conn, kind="topic", title="قلب",
+                    source_url="/qbank/topic-id-15", position=0)
+    upsert_category(conn, kind="topic", title="نارسایی قلبی",
+                    source_url="/qbank/topic-id-15?tag=52", position=1)
+    q = make_dummy_question(1)
+    q.site_question_id = 1473
+    upsert_question(conn, q, topic_id=15, tag_id=52,
+                    subtopic_title="نارسایی قلبی")
+
+    progress = get_category_progress(conn)
+    assert progress["/qbank/topic-id-15"]["scraped"] == 1
+    assert progress["/qbank/topic-id-15?tag=52"]["scraped"] == 1
+
+
+def test_untagged_count_uses_nodes(conn):
+    """A question read through a subtopic is classified, even though its tag
+    is stored on a node rather than only on the question row."""
+    from medo.db import count_untagged_questions
+
+    q = make_dummy_question(1)
+    q.site_question_id = 1473
+    upsert_question(conn, q, topic_id=15, tag_id=52, subtopic_title="x")
+    assert count_untagged_questions(conn) == 0
+
+    second = make_dummy_question(2, stem="سوال دوم دربارهٔ سردرد")
+    second.site_question_id = 1474
+    upsert_question(conn, second, topic_id=15)
+    assert count_untagged_questions(conn) == 1
+
+
+def test_old_rows_are_backfilled_into_nodes_on_startup(tmp_path):
+    """Rows written before question_nodes existed must appear in it."""
+    from medo.db import count_node_questions
+
+    db_file = tmp_path / "old.db"
+    conn = get_connection(db_file)
+    init_db(conn)
+    q = make_dummy_question(1)
+    upsert_question(conn, q, topic_id=15, tag_id=52, subtopic_title="نارسایی")
+    conn.execute("DELETE FROM question_nodes")
+    conn.commit()
+
+    init_db(conn)
+    assert count_node_questions(conn, 15, 52) == 1
+    conn.close()
+
+
 def test_root_order_is_internship_then_preinternship_then_authored(conn):
     """The user's browse order, independent of the site's position numbers."""
     from medo.db import get_category_tree, upsert_category

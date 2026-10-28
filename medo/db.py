@@ -256,10 +256,52 @@ def init_db(conn: sqlite3.Connection) -> None:
             cur.execute(
                 "ALTER TABLE questions ADD COLUMN download_bytes INTEGER DEFAULT 0;"
             )
+        # The site's own question id (#question-meta).  It stays the same when
+        # a stem is edited upstream and when the question is read again through
+        # another subtopic, so it is the identity a repair pass can rely on.
+        # NULL for rows stored before this column existed.
+        if "site_question_id" not in cols:
+            cur.execute(
+                "ALTER TABLE questions ADD COLUMN site_question_id INTEGER;"
+            )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_questions_site_id "
+            "ON questions(site_question_id) WHERE site_question_id IS NOT NULL;"
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_questions_topic_tag "
             "ON questions(topic_id, tag_id);"
         )
+
+        # A question can be reached through several navigation nodes: the whole
+        # topic and any number of «?tag=» subtopics.  questions.tag_id can hold
+        # only one of them, so every membership lives here; the old columns
+        # stay as the *primary* node for readers that have not moved yet.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS question_nodes (
+                question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+                topic_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL DEFAULT 0,
+                subtopic_title TEXT,
+                PRIMARY KEY (question_id, topic_id, tag_id)
+            );
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_question_nodes_node "
+            "ON question_nodes(topic_id, tag_id);"
+        )
+        # Backfill from the single-parent rows.  Runs on every start but only
+        # touches questions that have no node row yet: a question that is now
+        # in several subtopics keeps all of them.
+        cur.execute("""
+            INSERT OR IGNORE INTO question_nodes
+                (question_id, topic_id, tag_id, subtopic_title)
+            SELECT q.id, q.topic_id, coalesce(q.tag_id, 0), q.subtopic_title
+            FROM questions q
+            WHERE q.topic_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM question_nodes n
+                              WHERE n.question_id = q.id)
+        """)
 
         # Rows written before the triggers existed are invisible to MATCH.
         # `questions_fts_docsize` holds one row per *indexed* document —
@@ -287,11 +329,18 @@ def upsert_question(
     download_bytes: int = 0,
 ) -> int:
     """
-    Insert or update a parsed question by its content_hash.
+    Insert or update a parsed question and record where it was found.
 
-    ``tag_id``/``subtopic_title`` are set when the question was read through a
-    subtopic (?tag=) filter; a later whole-topic run leaves them untouched, so
-    a broad re-scrape never erases the finer classification.
+    Identity is the site's own question id (#question-meta) when the page
+    exposed one, else the content hash.  A stem edited upstream changes the
+    hash but not the site id, so the stored row is updated instead of being
+    duplicated.
+
+    ``tag_id``/``subtopic_title`` describe the subtopic (?tag=) the page was
+    read through.  Every membership goes into ``question_nodes``;
+    ``questions.topic_id``/``tag_id`` keep the FIRST one ever seen (the old
+    single-parent view), so a later subtopic pass can never steal the tag an
+    earlier one assigned.
 
     ``download_bytes`` is that question's measured network cost.  A re-scrape
     with no measurement (0) keeps the previous value instead of erasing it.
@@ -303,20 +352,40 @@ def upsert_question(
     now = datetime.now(timezone.utc).isoformat()
     opts_json = q.options_json()
     vote_json = q.vote_percent_json()
+    site_id = q.site_question_id
+    if not isinstance(site_id, int) or isinstance(site_id, bool) or site_id <= 0:
+        site_id = None
+    node_tag = int(tag_id) if tag_id not in (None, "") else 0
 
     with transaction(conn) as cur:
-        # Check if already exists by content_hash
-        cur.execute(
-            "SELECT id FROM questions WHERE content_hash = ?",
-            (q.content_hash,),
-        )
-        row = cur.fetchone()
+        # Site id first: it survives an upstream edit of the stem/options.
+        row = None
+        if site_id is not None:
+            row = cur.execute(
+                "SELECT id FROM questions WHERE site_question_id = ?",
+                (site_id,),
+            ).fetchone()
+        if row is None:
+            row = cur.execute(
+                "SELECT id FROM questions WHERE content_hash = ?",
+                (q.content_hash,),
+            ).fetchone()
 
         if row:
             qid = row["id"]
+            # content_hash is UNIQUE.  When the page changed upstream the site
+            # id finds the old row whose hash no longer matches; if some other
+            # row already owns the new hash, keep the stored one rather than
+            # failing the whole page on an IntegrityError.
+            clash = cur.execute(
+                "SELECT 1 FROM questions WHERE content_hash = ? AND id <> ?",
+                (q.content_hash, qid),
+            ).fetchone()
             cur.execute("""
                 UPDATE questions SET
-                    topic_id = coalesce(?, topic_id),
+                    content_hash = coalesce(?, content_hash),
+                    site_question_id = coalesce(?, site_question_id),
+                    topic_id = coalesce(topic_id, ?),
                     source_url = ?,
                     source_page = ?,
                     ordinal = ?,
@@ -331,12 +400,14 @@ def upsert_question(
                     explanation_status = ?,
                     has_images = ?,
                     category_path = coalesce(?, category_path),
-                    tag_id = coalesce(?, tag_id),
-                    subtopic_title = coalesce(?, subtopic_title),
+                    tag_id = CASE WHEN tag_id IS NULL THEN ? ELSE tag_id END,
+                    subtopic_title = coalesce(subtopic_title, ?),
                     download_bytes = CASE WHEN ? > 0 THEN ? ELSE download_bytes END,
                     updated_at = ?
                 WHERE id = ?
             """, (
+                None if clash else q.content_hash,
+                site_id,
                 topic_id,
                 q.source_url,
                 q.source_page,
@@ -352,7 +423,7 @@ def upsert_question(
                 q.explanation_status.value,
                 1 if q.has_images else 0,
                 category_path,
-                tag_id,
+                node_tag,
                 subtopic_title,
                 int(download_bytes or 0),
                 int(download_bytes or 0),
@@ -367,8 +438,8 @@ def upsert_question(
                     correct_index, answer_source, vote_percent_json,
                     explanation_html, explanation_text, explanation_status,
                     has_images, category_path, tag_id, subtopic_title,
-                    download_bytes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    download_bytes, site_question_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 topic_id,
                 q.source_url,
@@ -389,10 +460,21 @@ def upsert_question(
                 tag_id,
                 subtopic_title,
                 int(download_bytes or 0),
+                site_id,
                 now,
                 now,
             ))
             qid = cur.lastrowid
+
+        if topic_id is not None and int(topic_id) > 0:
+            cur.execute("""
+                INSERT INTO question_nodes
+                    (question_id, topic_id, tag_id, subtopic_title)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(question_id, topic_id, tag_id) DO UPDATE SET
+                    subtopic_title = coalesce(excluded.subtopic_title,
+                                              question_nodes.subtopic_title)
+            """, (qid, int(topic_id), node_tag, subtopic_title))
 
         # Link any image assets
         for img in q.images:
@@ -409,6 +491,117 @@ def upsert_question(
     return qid
 
 
+def get_question_nodes(conn: sqlite3.Connection, question_id: int) -> list[dict]:
+    """Every navigation node a question was reached through."""
+    try:
+        rows = conn.execute(
+            "SELECT topic_id, tag_id, subtopic_title FROM question_nodes "
+            "WHERE question_id = ? ORDER BY topic_id, tag_id",
+            (int(question_id),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{"topic_id": int(r["topic_id"]), "tag_id": int(r["tag_id"] or 0),
+             "subtopic_title": r["subtopic_title"]} for r in rows]
+
+
+def _primary_node(row: dict) -> list[dict]:
+    """The old single-parent columns as a one-item node list."""
+    tid = row.get("topic_id")
+    if not tid:
+        return []
+    return [{"topic_id": int(tid), "tag_id": int(row.get("tag_id") or 0),
+             "subtopic_title": row.get("subtopic_title")}]
+
+
+def _attach_nodes(conn: sqlite3.Connection, rows: list[dict]) -> list[dict]:
+    """Add each question's ``nodes`` list with ONE extra query.
+
+    The web UI, the .medo bundle and the offline export all need to know every
+    topic/subtopic a question belongs to; joining per row would make
+    /api/questions quadratic.
+    """
+    if not rows:
+        return rows
+    if not _table_exists(conn, "question_nodes"):
+        for row in rows:
+            row["nodes"] = _primary_node(row)
+        return rows
+
+    by_id: dict[int, list[dict]] = {}
+    ids = [int(r["id"]) for r in rows]
+    try:
+        if len(ids) > 500:
+            # Stay below SQLite's bound-variable limit on a full bank.
+            cursor = conn.execute(
+                "SELECT question_id, topic_id, tag_id, subtopic_title "
+                "FROM question_nodes ORDER BY topic_id, tag_id"
+            )
+        else:
+            marks = ",".join("?" for _ in ids)
+            cursor = conn.execute(
+                f"SELECT question_id, topic_id, tag_id, subtopic_title "
+                f"FROM question_nodes WHERE question_id IN ({marks}) "
+                f"ORDER BY topic_id, tag_id", ids
+            )
+        for r in cursor.fetchall():
+            by_id.setdefault(int(r["question_id"]), []).append({
+                "topic_id": int(r["topic_id"]),
+                "tag_id": int(r["tag_id"] or 0),
+                "subtopic_title": r["subtopic_title"],
+            })
+    except sqlite3.OperationalError:
+        by_id = {}
+    for row in rows:
+        row["nodes"] = by_id.get(int(row["id"])) or _primary_node(row)
+    return rows
+
+
+def count_node_questions(
+    conn: sqlite3.Connection, topic_id: int, tag_id: Optional[int] = None,
+) -> int:
+    """Distinct questions stored for a topic, or for one of its subtopics.
+
+    ``tag_id=None`` counts the whole topic: questions read through any node of
+    it, so a subtopic question is not missing from its parent's badge.
+    """
+    sql = "SELECT count(DISTINCT question_id) FROM question_nodes WHERE topic_id = ?"
+    params: list = [int(topic_id)]
+    if tag_id is not None:
+        sql += " AND tag_id = ?"
+        params.append(int(tag_id))
+    try:
+        found = int(conn.execute(sql, params).fetchone()[0] or 0)
+        # Nodes are authoritative whenever this topic has any: a question in
+        # two subtopics must not be counted twice.
+        if found or (conn.execute(
+                "SELECT 1 FROM question_nodes WHERE topic_id = ? LIMIT 1",
+                (int(topic_id),)).fetchone()):
+            return found
+        # No node rows for this topic at all (a database written before the
+        # table existed): read the old single-parent column instead.
+        legacy = "SELECT count(*) FROM questions WHERE topic_id = ?"
+        legacy_params: list = [int(topic_id)]
+        if tag_id is not None:
+            legacy += " AND tag_id = ?"
+            legacy_params.append(int(tag_id))
+        return int(conn.execute(legacy, legacy_params).fetchone()[0] or 0)
+    except sqlite3.OperationalError:
+        return 0
+
+
+def count_untagged_questions(conn: sqlite3.Connection) -> int:
+    """Questions no subtopic page has claimed yet (whole-topic downloads)."""
+    try:
+        return int(conn.execute(
+            "SELECT count(*) FROM questions q WHERE NOT EXISTS ("
+            "  SELECT 1 FROM question_nodes n"
+            "  WHERE n.question_id = q.id AND n.tag_id > 0)"
+        ).fetchone()[0] or 0)
+    except sqlite3.OperationalError:
+        return 0
+
+
 def get_question_by_id(conn: sqlite3.Connection, qid: int) -> Optional[dict]:
     """Retrieve a single question by id."""
     cur = conn.cursor()
@@ -419,6 +612,7 @@ def get_question_by_id(conn: sqlite3.Connection, qid: int) -> Optional[dict]:
     d = dict(row)
     d["options"] = json.loads(d["options_json"])
     d["vote_percent"] = json.loads(d["vote_percent_json"]) if d["vote_percent_json"] else {}
+    d["nodes"] = get_question_nodes(conn, qid)
     return d
 
 
@@ -442,7 +636,7 @@ def get_questions_by_topic(
         d["options"] = json.loads(d["options_json"])
         d["vote_percent"] = json.loads(d["vote_percent_json"]) if d["vote_percent_json"] else {}
         results.append(d)
-    return results
+    return _attach_nodes(conn, results)
 
 
 def get_all_questions(conn: sqlite3.Connection) -> list[dict]:
@@ -458,7 +652,7 @@ def get_all_questions(conn: sqlite3.Connection) -> list[dict]:
         d["options"] = json.loads(d["options_json"])
         d["vote_percent"] = json.loads(d["vote_percent_json"]) if d["vote_percent_json"] else {}
         results.append(d)
-    return results
+    return _attach_nodes(conn, results)
 
 
 def search_questions(conn: sqlite3.Connection, query: str, limit: int = 50) -> list[dict]:
@@ -478,7 +672,7 @@ def search_questions(conn: sqlite3.Connection, query: str, limit: int = 50) -> l
         d["options"] = json.loads(d["options_json"])
         d["vote_percent"] = json.loads(d["vote_percent_json"]) if d["vote_percent_json"] else {}
         results.append(d)
-    return results
+    return _attach_nodes(conn, results)
 
 
 def upsert_asset(
@@ -1210,21 +1404,36 @@ def get_category_progress(conn: sqlite3.Connection) -> dict[str, dict]:
     ('completed' | 'running' | 'paused' | 'limit' | ... | None if never run).
     """
     cur = conn.cursor()
-    rows = cur.execute(
-        "SELECT topic_id, count(*) AS n FROM questions "
-        "WHERE topic_id IS NOT NULL GROUP BY topic_id"
-    ).fetchall()
-    by_topic = {r["topic_id"]: r["n"] for r in rows}
-
+    # Counts come from question_nodes: one question can sit in several
+    # subtopics, and its parent topic must still count it exactly once.
+    by_topic: dict[int, int] = {}
     by_tag: dict[tuple[int, int], int] = {}
-    cols = {r[1] for r in cur.execute("PRAGMA table_info(questions)").fetchall()}
-    if "tag_id" in cols:
+    if _table_exists(conn, "question_nodes"):
         for r in cur.execute(
-            "SELECT topic_id, tag_id, count(*) AS n FROM questions "
-            "WHERE topic_id IS NOT NULL AND tag_id IS NOT NULL "
+            "SELECT topic_id, count(DISTINCT question_id) AS n "
+            "FROM question_nodes GROUP BY topic_id"
+        ).fetchall():
+            by_topic[int(r["topic_id"])] = int(r["n"])
+        for r in cur.execute(
+            "SELECT topic_id, tag_id, count(DISTINCT question_id) AS n "
+            "FROM question_nodes WHERE tag_id > 0 "
             "GROUP BY topic_id, tag_id"
         ).fetchall():
             by_tag[(int(r["topic_id"]), int(r["tag_id"]))] = int(r["n"])
+    else:  # a database opened without init_db: read the old columns
+        for r in cur.execute(
+            "SELECT topic_id, count(*) AS n FROM questions "
+            "WHERE topic_id IS NOT NULL GROUP BY topic_id"
+        ).fetchall():
+            by_topic[int(r["topic_id"])] = int(r["n"])
+        cols = {r[1] for r in cur.execute("PRAGMA table_info(questions)").fetchall()}
+        if "tag_id" in cols:
+            for r in cur.execute(
+                "SELECT topic_id, tag_id, count(*) AS n FROM questions "
+                "WHERE topic_id IS NOT NULL AND tag_id IS NOT NULL "
+                "GROUP BY topic_id, tag_id"
+            ).fetchall():
+                by_tag[(int(r["topic_id"]), int(r["tag_id"]))] = int(r["n"])
 
     states = {
         r["topic_id"]: dict(r)

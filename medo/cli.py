@@ -347,18 +347,24 @@ def diagnose_tags(
     subtopics claim to be complete while holding fewer questions than the tree
     declares (a truncated download).
     """
-    from medo.db import declared_questions, get_connection, init_db, tag_id_of
+    from medo.db import (count_node_questions, declared_questions,
+                         get_connection, init_db, tag_id_of)
 
     conn = get_connection(db_path)
     init_db(conn)
 
+    # question_nodes, not questions.tag_id: a question read through two
+    # subtopics has one row there and only one tag in the old column.
     per_topic = {
-        int(r["topic_id"]): dict(r)
-        for r in (dict(x) for x in conn.execute(
-            "SELECT topic_id, COUNT(*) AS stored, "
-            "  SUM(CASE WHEN tag_id IS NULL OR tag_id = 0 THEN 1 ELSE 0 END) AS untagged "
-            "FROM questions WHERE topic_id IS NOT NULL GROUP BY topic_id"
-        ).fetchall())
+        int(r["topic_id"]): {
+            "stored": int(r["stored"] or 0),
+            "untagged": int(r["stored"] or 0) - int(r["tagged"] or 0),
+        }
+        for r in conn.execute(
+            "SELECT topic_id, count(DISTINCT question_id) AS stored, "
+            "  count(DISTINCT CASE WHEN tag_id > 0 THEN question_id END) AS tagged "
+            "FROM question_nodes GROUP BY topic_id"
+        ).fetchall()
     }
 
     # A subtopic is a «?tag=» slice; the tree row carries its declared size and
@@ -372,10 +378,7 @@ def diagnose_tags(
         if tag is None or not match:
             continue
         tid = int(match.group(1))
-        stored = int(conn.execute(
-            "SELECT COUNT(*) FROM questions WHERE topic_id = ? AND tag_id = ?",
-            (tid, tag),
-        ).fetchone()[0])
+        stored = count_node_questions(conn, tid, tag)
         declared = declared_questions(conn, tid, tag)
         state = conn.execute(
             "SELECT status FROM micro_state WHERE topic_id = ? AND tag_id = ?",
@@ -469,6 +472,52 @@ def diagnose_live(
 
     console.print("[dim]Logged to logs/medo.log. A sample must be saved by hand "
                   "(data/diag is git-ignored).[/dim]")
+
+
+@app.command(name="check-site-ids")
+def check_site_ids(
+    topic: int = typer.Option(..., "--topic", "-t", help="Topic ID to open (e.g. 15)"),
+    tag: Optional[int] = typer.Option(None, "--tag", help="Subtopic (?tag=) to open"),
+    headless: bool = typer.Option(True, "--headless/--no-headless"),
+    storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path"),
+):
+    """
+    Fail loudly when the site stops exposing the question id.
+
+    De-duplication, the repair queue and every re-location of a question rely
+    on #question-meta's id; a silent NULL would quietly create duplicate rows,
+    so this command exists to be run (and to be called by `medo doctor`).
+    """
+    from playwright.sync_api import sync_playwright
+
+    from medo import applog
+    from medo.parser import parse_question_html
+    from medo.scraper import Harvester, topic_url
+
+    harvester = Harvester(db_path=DEFAULT_DB_PATH, storage_state=storage_state,
+                          headless=headless)
+    url = topic_url(topic, page=1, tag_id=tag)
+    site_id: Optional[int] = None
+    with sync_playwright() as p:
+        browser, page = harvester._new_page(p)
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            harvester._wait_for_question(page)
+            parsed = parse_question_html(page.content(), source_url=url,
+                                         source_page=1, ordinal=1)
+            site_id = parsed.site_question_id
+        finally:
+            browser.close()
+
+    if not site_id:
+        applog.log(f"[site-id] {url}: #question-meta carried no usable id")
+        console.print("[bold red]× سایت شناسهٔ سوال را برنگرداند.[/bold red]")
+        console.print("[red]#question-meta دیگر data-pqrfhskdjf ندارد. تا این "
+                      "درست شود، هر دانلود ممکن است سوال تکراری بسازد.[/red]")
+        raise typer.Exit(code=1)
+
+    applog.log(f"[site-id] {url}: site id {site_id}")
+    console.print(f"[green]✓[/green] شناسهٔ سوال در سایت: [bold]{site_id}[/bold]")
 
 
 @app.command(name="import-fixtures")

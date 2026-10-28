@@ -58,6 +58,10 @@ class ParsedQuestion:
 
     # --- Answer ---
     correct_index: Optional[int]         # 1-based; None if unknown
+    # The site's own question id (#question-meta).  It survives a stem edit,
+    # a re-download through a different subtopic and a guest/login switch, so
+    # it is the identity to use when the page exposed one.
+    site_question_id: Optional[int] = None
     answer_source: AnswerSource = AnswerSource.UNKNOWN
 
     # --- Votes ---

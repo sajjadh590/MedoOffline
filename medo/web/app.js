@@ -674,6 +674,25 @@
   }
 
   // --- Filtering & Search ---
+  // A question can be reached through several nodes (the whole topic, and any
+  // number of «?tag=» subtopics), so the archive sends the full list.  Old
+  // exports only carry the single topic_id/tag_id pair.
+  function questionNodes(item) {
+    if (Array.isArray(item.nodes) && item.nodes.length) return item.nodes;
+    if (!item.topic_id) return [];
+    return [{ topic_id: item.topic_id, tag_id: item.tag_id || 0 }];
+  }
+
+  function inTreeNode(item, f) {
+    const nodes = questionNodes(item);
+    if (f.tag !== undefined && f.tag !== null) {
+      const only = Number([...f.ids][0]);
+      return nodes.some(n => Number(n.topic_id) === only
+        && Number(n.tag_id) === Number(f.tag));
+    }
+    return nodes.some(n => f.ids.has(Number(n.topic_id)));
+  }
+
   function applyFilter() {
     const q = state.searchQuery.trim().toLowerCase();
     state.filteredIndices = state.questions.map((item, idx) => idx).filter(idx => {
@@ -685,16 +704,7 @@
       if (state.activeFilter === 'bookmarked' && !state.bookmarks.has(qid)) return false;
 
       // Tree filter: one topic, one subtopic, or every topic under a category
-      if (state.treeFilter) {
-        const f = state.treeFilter;
-        if (f.tag !== undefined && f.tag !== null) {
-          const only = [...f.ids][0];
-          if (Number(item.topic_id) !== Number(only)) return false;
-          if (Number(item.tag_id) !== Number(f.tag)) return false;
-        } else if (!f.ids.has(Number(item.topic_id))) {
-          return false;
-        }
-      }
+      if (state.treeFilter && !inTreeNode(item, state.treeFilter)) return false;
 
       // Search query
       if (q) {
@@ -999,10 +1009,7 @@
     // «بیماری‌های پریکارد» selected, «همه (۸۰)» next to 30 questions was
     // simply wrong.
     const f = state.treeFilter;
-    const inTree = item => !f || (f.tag !== undefined && f.tag !== null
-      ? Number(item.topic_id) === Number([...f.ids][0])
-        && Number(item.tag_id) === Number(f.tag)
-      : f.ids.has(Number(item.topic_id)));
+    const inTree = item => !f || inTreeNode(item, f);
     const base = state.questions.filter(inTree);
     elements.countAll.textContent = toPersianDigits(base.length);
 

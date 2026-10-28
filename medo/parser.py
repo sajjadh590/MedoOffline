@@ -766,6 +766,72 @@ def _parse_inline_color(style: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+# #question-meta carries several data-* integers.  ``data-pqrfhskdjf`` is the
+# STABLE site question id (Q53 of a Pro topic = 1473, the same question in the
+# free capture = 1473); its neighbours are the topic id, the page number, the
+# option count and a per-load token (see F1 in PROMPT.md).
+_SITE_ID_ATTR = "data-pqrfhskdjf"
+_META_NOT_ID_ATTRS = {
+    "data-kjfhgdsa", "data-mnofhskdjf",   # topic id
+    "data-mnbvcxza",                       # page number
+    "data-defhskdjfh",                     # option count
+    "data-sasvdlfj",                       # per-load token
+}
+
+
+def _positive_int(value) -> Optional[int]:
+    """The integer in an attribute value, or None (never a guess)."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _site_question_id(
+    dom, source_url: str = "", source_page: Optional[int] = None,
+    option_count: Optional[int] = None,
+) -> Optional[int]:
+    """The site's stable question id from #question-meta, or None.
+
+    The named attribute is the primary source.  Attribute names are part of
+    the site's template, so the documented fallback also works: among the
+    remaining integers, take the one sitting closest to the attribute that
+    equals the topic id — the ids are grouped together in the element.
+    """
+    node = dom.find_by_id("question-meta")
+    if node is None:
+        return None
+    attrs = node.get("attrs", {})
+    direct = _positive_int(attrs.get(_SITE_ID_ATTR))
+    if direct is not None:
+        return direct
+
+    topic_match = re.search(r"topic-id-(\d+)", source_url or "")
+    topic_id = int(topic_match.group(1)) if topic_match else None
+    skip_values = {v for v in (source_page, option_count) if v}
+
+    names = [str(k).lower() for k in attrs.keys()]
+    pool: list[tuple[int, int]] = []
+    for pos, name in enumerate(names):
+        if not name.startswith("data-") or name in _META_NOT_ID_ATTRS:
+            continue
+        number = _positive_int(attrs.get(name))
+        if number is None or number == topic_id or number in skip_values:
+            continue
+        pool.append((pos, number))
+    if not pool:
+        return None
+    if len(pool) == 1:
+        return pool[0][1]
+
+    anchor = next((i for i, name in enumerate(names)
+                   if topic_id is not None
+                   and _positive_int(attrs.get(name)) == topic_id), 0)
+    pool.sort(key=lambda item: (abs(item[0] - anchor), -item[1]))
+    return pool[0][1]
+
+
 def parse_question_html(
     html: str,
     *,
@@ -950,6 +1016,8 @@ def parse_question_html(
         stem_text          = stem_text,
         options            = options,
         correct_index      = correct_index,
+        site_question_id   = _site_question_id(dom, source_url, source_page,
+                                              len(options)),
         answer_source      = answer_source,
         vote_percent       = [o.vote_percent for o in options],
         explanation_html   = expl_html,
