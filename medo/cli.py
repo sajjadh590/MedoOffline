@@ -439,8 +439,9 @@ def diagnose_live(
     storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path"),
 ):
     """
-    One polite live probe: does the site honour ?page=1, and does ?tag= filter?
-    Saves a git-ignored sample under data/diag/. Run with the VPN routed direct.
+    One polite live probe: what the site's own counter shows when ?page=1 is
+    requested and whether the ?tag= view filters. Run with the VPN routed
+    direct; findings go to logs/medo.log.
     """
     from playwright.sync_api import sync_playwright
 
