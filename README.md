@@ -177,8 +177,9 @@ tests/               pytest suite + shared fixtures
 
 Read [`AGENTS.md`](AGENTS.md) before changing code (smallest complete change,
 stdlib first, Persian UI), [`PROMPT.md`](PROMPT.md) for the full project brief
-and every bug fixed so far, and [`NOTES.md`](NOTES.md) for the chronological
-evidence.
+and every bug fixed so far, [`NOTES.md`](NOTES.md) for the chronological
+evidence, and [`HANDOFF.md`](HANDOFF.md) for the latest change report (phases
+0–6) with verification results and open work.
 
 ## آزمون‌ها
 
