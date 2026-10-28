@@ -258,10 +258,43 @@ def main() -> int:
                 print(f"  already tagged: {progress}")
 
                 assignments: dict[int, dict] = {}
+
+                def flush(ids: list[int]) -> None:
+                    """Write one subtopic's matches and commit right away.
+
+                    The whole-topic commit meant a 429 on subtopic 4 discarded
+                    the mapping of subtopics 1-3, and the next run paid for
+                    them again.
+                    """
+                    nonlocal mapped_total, skipped_ambiguous
+                    updates = 0
+                    conflicts = 0
+                    for question_id in ids:
+                        payload = assignments[question_id]
+                        row = conn.execute(
+                            "SELECT tag_id FROM questions WHERE id = ?",
+                            (question_id,)
+                        ).fetchone()
+                        if row and row["tag_id"] not in (None, payload["tag_id"]):
+                            conflicts += 1
+                            continue
+                        updates += 1
+                        if not args.dry_run:
+                            conn.execute(
+                                "UPDATE questions SET tag_id = ?, "
+                                "subtopic_title = ?, "
+                                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                                (payload["tag_id"], payload["title"], question_id))
+                    if not args.dry_run:
+                        conn.commit()
+                    mapped_total += updates
+                    skipped_ambiguous += conflicts
+
                 for sub in subs:
                     total_pages = 0
                     fetched = 0
                     matched = 0
+                    matched_ids: list[int] = []
                     done = tagged_count(conn, topic_id, sub["tag_id"])
                     if sub["declared"] and done >= sub["declared"] and not args.refetch:
                         skipped_done += 1
@@ -295,40 +328,18 @@ def main() -> int:
                                 assignments[question_id] = {
                                     "tag_id": sub["tag_id"], "title": sub["title"],
                                 }
+                                matched_ids.append(question_id)
                                 matched += 1
                         print(f"  tag {sub['tag_id']:>5} «{sub['title'][:38]}»: "
                               f"{fetched} page(s), {matched} match(es)")
+                        flush(matched_ids)
                     except Throttled:
                         raise          # the whole run has to stop, not just this tag
                     except Exception as exc:
                         print(f"  tag {sub['tag_id']:>5}: stopped at page "
                               f"{fetched + 1}/{total_pages or '?'} — {exc}")
 
-                # A signature shared by two rows is assigned only when the
-                # candidates do not already disagree; guessing would be worse
-                # than leaving the tag empty.
-                conflicts = 0
-                updates = 0
-                for question_id, payload in assignments.items():
-                    row = conn.execute(
-                        "SELECT tag_id FROM questions WHERE id = ?", (question_id,)
-                    ).fetchone()
-                    if row and row["tag_id"] not in (None, payload["tag_id"]):
-                        conflicts += 1
-                        continue
-                    updates += 1
-                    if not args.dry_run:
-                        conn.execute(
-                            "UPDATE questions SET tag_id = ?, subtopic_title = ?, "
-                            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                            (payload["tag_id"], payload["title"], question_id))
-                if not args.dry_run:
-                    conn.commit()
-                mapped_total += updates
-                skipped_ambiguous += conflicts
-                print(f"  -> {'would update' if args.dry_run else 'updated'} "
-                      f"{updates} question(s), kept {conflicts} conflicting tag(s)")
-
+                print(f"  -> {len(assignments)} question(s) mapped for this topic")
             browser.close()
     except Throttled as exc:
         stopped_early = exc
