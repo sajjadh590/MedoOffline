@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import re
 import sys
 import typer
 from rich.console import Console
@@ -335,6 +336,138 @@ def verify(
         console.print("[bold green][+] Database integrity check: ALL PASSED![/bold green]")
     else:
         console.print("[bold yellow][!] Some questions have warnings above.[/bold yellow]")
+
+
+@app.command(name="diagnose-tags")
+def diagnose_tags(
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+):
+    """
+    Read-only: where questions are stored without their subtopic, and which
+    subtopics claim to be complete while holding fewer questions than the tree
+    declares (a truncated download).
+    """
+    from medo.db import declared_questions, get_connection, init_db, tag_id_of
+
+    conn = get_connection(db_path)
+    init_db(conn)
+
+    per_topic = {
+        int(r["topic_id"]): dict(r)
+        for r in (dict(x) for x in conn.execute(
+            "SELECT topic_id, COUNT(*) AS stored, "
+            "  SUM(CASE WHEN tag_id IS NULL OR tag_id = 0 THEN 1 ELSE 0 END) AS untagged "
+            "FROM questions WHERE topic_id IS NOT NULL GROUP BY topic_id"
+        ).fetchall())
+    }
+
+    # A subtopic is a «?tag=» slice; the tree row carries its declared size and
+    # micro_state carries the cursor (status + last page).
+    subtopics: dict[int, list[dict]] = {}
+    for node in conn.execute(
+        "SELECT source_url, title FROM categories WHERE source_url LIKE '%?tag=%'"
+    ).fetchall():
+        tag = tag_id_of(node["source_url"])
+        match = re.search(r"topic-id-(\d+)", node["source_url"] or "")
+        if tag is None or not match:
+            continue
+        tid = int(match.group(1))
+        stored = int(conn.execute(
+            "SELECT COUNT(*) FROM questions WHERE topic_id = ? AND tag_id = ?",
+            (tid, tag),
+        ).fetchone()[0])
+        declared = declared_questions(conn, tid, tag)
+        state = conn.execute(
+            "SELECT status FROM micro_state WHERE topic_id = ? AND tag_id = ?",
+            (tid, tag),
+        ).fetchone() if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='micro_state'"
+        ).fetchone() else None
+        subtopics.setdefault(tid, []).append({
+            "title": node["title"], "tag": tag, "stored": stored,
+            "declared": declared, "status": (state["status"] if state else None),
+        })
+
+    rows = []
+    for tid in sorted(set(per_topic) | set(subtopics)):
+        subs = subtopics.get(tid, [])
+        row = per_topic.get(tid, {})
+        if not row.get("stored") and not any(s.get("stored") for s in subs):
+            continue  # never downloaded: nothing to diagnose
+        rows.append({
+            "topic": tid,
+            "stored": row.get("stored", 0),
+            "untagged": row.get("untagged", 0),
+            "declared": declared_questions(conn, tid),
+            "subtopic_sum": sum(int(s.get("declared") or 0) for s in subs),
+            "truncated": [s for s in subs
+                          if s.get("status") == "completed" and s.get("declared")
+                          and int(s.get("stored") or 0) < int(s.get("declared") or 0)],
+        })
+    conn.close()
+
+    if not rows and not per_topic and not subtopics:
+        console.print("[yellow][!] No topics in the database yet.[/yellow]")
+        return
+
+    table = Table(title="Subtopics and questions", header_style="bold magenta")
+    table.add_column("topic", style="cyan")
+    table.add_column("stored", justify="right")
+    table.add_column("no subtopic", justify="right", style="yellow")
+    table.add_column("declared", justify="right")
+    table.add_column("subtopic sum", justify="right")
+    table.add_column("truncated subtopics", style="red")
+
+    for row in rows:
+        table.add_row(
+            str(row["topic"]),
+            str(row["stored"]),
+            str(row["untagged"]),
+            str(row["declared"]),
+            str(row["subtopic_sum"]),
+            ", ".join(f"{s['title']} ({s.get('stored', 0)}/{s.get('declared')})"
+                      for s in row["truncated"]) or "—",
+        )
+    console.print(table)
+
+
+@app.command(name="diagnose-live")
+def diagnose_live(
+    topic: int = typer.Option(..., "--topic", "-t", help="Topic ID to probe (e.g. 15)"),
+    tag: Optional[int] = typer.Option(None, "--tag", help="Subtopic (?tag=) to probe"),
+    headless: bool = typer.Option(True, "--headless/--no-headless"),
+    storage_state: Optional[Path] = typer.Option(None, "--state", help="storage_state.json path"),
+):
+    """
+    One polite live probe: does the site honour ?page=1, and does ?tag= filter?
+    Saves a git-ignored sample under data/diag/. Run with the VPN routed direct.
+    """
+    from playwright.sync_api import sync_playwright
+
+    from medo.scraper import Harvester, read_question_position, topic_url
+
+    harvester = Harvester(db_path=DEFAULT_DB_PATH, storage_state=storage_state,
+                          headless=headless)
+    with sync_playwright() as p:
+        browser, page = harvester._new_page(p)
+        try:
+            for label, url in (
+                ("with page=1", topic_url(topic, page=1, tag_id=tag)),
+                ("without page", topic_url(topic, tag_id=tag)),
+            ):
+                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                harvester._wait_for_question(page)
+                cur, total = read_question_position(
+                    page.locator("body").inner_text(timeout=8000))
+                site_id = page.locator("#question-meta").get_attribute(
+                    "data-pqrfhskdjf") if page.locator("#question-meta").count() else None
+                console.print(f"  {label}: counter {cur} of {total} · site id {site_id}")
+                harvester._polite_delay()
+        finally:
+            browser.close()
+
+    console.print("[dim]Logged to logs/medo.log. A sample must be saved by hand "
+                  "(data/diag is git-ignored).[/dim]")
 
 
 @app.command(name="import-fixtures")
