@@ -892,10 +892,20 @@ class Harvester:
         if storage_state is None:
             storage_state = os.environ.get("MEDO_STORAGE_STATE", DEFAULT_STORAGE_STATE)
         self.storage_state = Path(storage_state)
+        # Which session read the pages of this run: the repair queue uses it to
+        # know which rows a signed-in pass could still improve.
+        self.fetched_as = ("login" if has_storage_state(self.storage_state)
+                           else "guest")
         if fast:
             # Opt-in faster pace: still single-request, smaller delays.
             delay_range = (0.8, 1.8)
-        self.delay_min, self.delay_max = delay_range
+        from medo.pacing import AdaptiveDelay
+
+        # One controller owns the pace: it widens on a 429 and settles after
+        # clean pages, instead of a fixed range that is wrong in both
+        # directions.
+        self.pace = AdaptiveDelay(*delay_range, on_log=print)
+        self.delay_min, self.delay_max = self.pace.range
         self.headless = headless
         self.on_progress = on_progress
         self.max_minutes = max_minutes
@@ -958,8 +968,9 @@ class Harvester:
         return None
 
     def _polite_delay(self) -> None:
-        """Uniform random delay; interruptible in 250 ms slices."""
-        delay = random.uniform(self.delay_min, self.delay_max)
+        """Uniform random delay from the adaptive range; interruptible."""
+        delay = self.pace.next_delay()
+        self.delay_min, self.delay_max = self.pace.range
         end = time.monotonic() + delay
         while not self._interrupted:
             remaining = end - time.monotonic()
@@ -1423,6 +1434,7 @@ class Harvester:
             conn, q, topic_id=topic_id, category_path=cat_path,
             tag_id=tag_id, subtopic_title=subtopic_title,
             download_bytes=self._bytes_this_question,
+            fetched_as=self.fetched_as,
         )
         self._question_times.append(time.monotonic())
         self._question_bytes.append(self._bytes_this_question)
@@ -1550,6 +1562,10 @@ class Harvester:
                         code = document_status(page)
                         if code == 429:
                             kind = "throttled"
+                            # Widen the pace before the retry the user makes
+                            # after the pause: the next run starts wider only
+                            # if it is the same process (the log says so).
+                            self.pace.throttled()
                         # What the site actually served, straight into the log:
                         # without it every failure read «could not position» and
                         # the real answer (429 / login / empty) was unknowable.
@@ -1684,6 +1700,8 @@ class Harvester:
                         conn, q, topic_id, tag_id=tag_id,
                         subtopic_title=subtopic_title)
                     scraped += 1
+                    self.pace.succeeded()
+                    self.delay_min, self.delay_max = self.pace.range
                     consecutive_errors, backoff = 0, BACKOFF_BASE
                     self._write_state(conn, topic_id, tag_id, current_page, "running")
                     if self.on_progress:

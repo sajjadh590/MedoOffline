@@ -1,16 +1,21 @@
-"""Find the answer for questions the archive could not grade.
+"""Repair stored questions from the signed-in session.
 
 Why this exists
 ---------------
-A scrape can store a question without its key: the guest session hid the
-answer, the page did not reveal it, or the run stopped before «نمایش جواب».
+A scrape can store a question without its key or its lesson: the guest session
+hid both, the page did not reveal them, or the run stopped before «نمایش جواب».
 The app then has to tell the reader «پاسخ ثبت نشده» and cannot grade it.
 
-This module revisits only those questions with the signed-in browser (which
-may see a key the guest session did not), clicks «نمایش جواب» on the exact
-question, and writes the answer back. Nothing is guessed: a page whose option
-texts do not match the stored question is skipped, and an answer that the site
+This module is the one resumable repair job. It revisits only the questions
+that still need the Pro session (no key, no/partial/locked lesson, or a row
+stored as a guest), clicks «نمایش جواب» on the exact question, and writes the
+answer, the votes and the clean lesson back. Nothing is guessed: a page whose
+option texts do not match the stored question is skipped, and anything the site
 still does not show is reported instead of invented.
+
+The queue is the answer to «چرا سوال ۴ (and whatever else) خالی است»: it walks
+the questions in id order and commits each one as it is repaired, so a stop,
+a 429 or a daily limit costs nothing already done.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from medo import applog
 from medo.auth import DEFAULT_STORAGE_STATE, has_storage_state
-from medo.db import DEFAULT_DB_PATH, get_connection
+from medo.db import DEFAULT_DB_PATH, get_connection, questions_needing_repair
 
 
 class Stopped(RuntimeError):
@@ -51,6 +56,14 @@ def normalize_options(options) -> str:
     return "|".join(parts)
 
 
+def _with_signature(row: dict) -> dict:
+    try:
+        row["signature"] = normalize_options(json.loads(row.get("options_json") or "[]"))
+    except (TypeError, ValueError):
+        row["signature"] = ""
+    return row
+
+
 def missing_questions(conn, topic_id: Optional[int] = None,
                       limit: Optional[int] = None) -> list[dict]:
     """Stored questions without a correct option, oldest first."""
@@ -65,13 +78,22 @@ def missing_questions(conn, topic_id: Optional[int] = None,
     if limit:
         sql += " LIMIT ?"
         args.append(int(limit))
-    rows = [dict(row) for row in conn.execute(sql, args).fetchall()]
-    for row in rows:
-        try:
-            row["signature"] = normalize_options(json.loads(row.get("options_json") or "[]"))
-        except (TypeError, ValueError):
-            row["signature"] = ""
+    rows = [_with_signature(dict(row)) for row in conn.execute(sql, args).fetchall()]
     return [row for row in rows if row["signature"]]
+
+
+def repair_queue(conn, topic_id: Optional[int] = None,
+                 limit: Optional[int] = None) -> list[dict]:
+    """Every question the signed-in session could still improve.
+
+    Same rows the scraper's ``NEEDS_REPAIR_SQL`` counts: no key, no or partial
+    lesson, or a page that was read as a guest.
+    """
+    rows = [_with_signature(row) for row in questions_needing_repair(conn)]
+    if topic_id:
+        rows = [row for row in rows if int(row.get("topic_id") or 0) == int(topic_id)]
+    rows = [row for row in rows if row.get("signature") or row.get("site_question_id")]
+    return rows[:int(limit)] if limit else rows
 
 
 def _page_url(topic_id: int, tag_id: Optional[int], page_no: int) -> str:
@@ -89,28 +111,36 @@ def audit_answers(
     dry_run: bool = False,
     delay: float = 0.7,
     scan_pages: int = 4,
+    require_login: bool = True,
 ) -> dict:
-    """Re-read every unanswered question and store what the site reveals."""
+    """Re-read every question of the repair queue and keep what the site shows."""
     conn = get_connection(db_path)
     try:
-        rows = missing_questions(conn, topic_id=topic_id, limit=limit)
+        rows = repair_queue(conn, topic_id=topic_id, limit=limit)
     finally:
         conn.close()
 
     result = {"checked": 0, "found": 0, "still_missing": 0,
-              "skipped": 0, "locked": 0}
+              "skipped": 0, "locked": 0, "status": "completed"}
     if not rows:
-        on_log("همهٔ سوالات بانک پاسخ دارند؛ چیزی برای بازیابی نمانده است.")
+        on_log("همهٔ سوال‌های بانک کامل‌اند؛ چیزی برای ترمیم نمانده است.")
+        return result
+    if require_login and not has_storage_state():
+        on_log("برای ترمیم پاسخ و درس‌نامه باید وارد حساب شوی: «ورود با مرورگر» "
+               "را بزن و بعد همین دکمه را تکرار کن.")
+        result["status"] = "auth_required"
         return result
 
-    on_log(f"{len(rows)} سوال بدون پاسخ پیدا شد؛ صفحه‌هایشان دوباره خوانده می‌شود...")
-    if not has_storage_state():
-        on_log("هشدار: وارد حساب نشده‌اید؛ سوالاتی که سایت فقط برای اعضای پرو "
-               "نشان می‌دهد بازیابی نمی‌شوند.")
+    on_log(f"{len(rows)} سوال برای ترمیم صف شده است؛ صفحه‌هایشان دوباره "
+           "خوانده می‌شود (هر سوال که ذخیره شود، بلافاصله ثبت می‌شود)...")
 
     from medo.browser import launch_browser, new_context
     from medo.parser import parse_question_html
-    from medo.scraper import Harvester, document_status
+    from medo.scraper import LIMIT_PHRASES, Harvester, document_status
+
+    # Images (the mind-map) are fetched and rewritten exactly like a scrape
+    # does it, so a repaired lesson renders offline like any other.
+    store_assets = Harvester(db_path=db_path)._store_assets
 
     with sync_playwright() as p:
         browser = launch_browser(p, headless=True)
@@ -121,7 +151,7 @@ def audit_answers(
         page = context.new_page()
         load_failures = 0
         try:
-            for index, row in enumerate(rows, start=1):
+            for row in rows:
                 if should_stop():
                     raise Stopped("stopped by user")
                 tid = int(row["topic_id"] or 0)
@@ -129,6 +159,7 @@ def audit_answers(
                     result["skipped"] += 1
                     continue
                 tag = int(row["tag_id"]) if row.get("tag_id") else None
+                site_id = int(row["site_question_id"]) if row.get("site_question_id") else None
                 start = int(row.get("source_page") or row.get("ordinal") or 1)
                 result["checked"] += 1
                 label = f"سوال {row['id']} (مبحث {tid}"
@@ -156,13 +187,16 @@ def audit_answers(
                             raise RuntimeError(
                                 ("سایت این اتصال را موقتاً محدود کرده (HTTP 429). "
                                  "این تقصیر اینترنت نیست؛ ۱۵ تا ۳۰ دقیقه صبر کن و "
-                                 "دوباره «بازیابی پاسخ‌ها» را بزن — تا همین‌جا هر "
+                                 "دوباره «ترمیم» را بزن — تا همین‌جا هر "
                                  "پاسخی که پیدا شد ذخیره شده است."
                                  if code == 429 else
                                  "سایت باز نشد (اینترنت/VPN/پروکسی را بررسی کنید؛ "
                                  "اگر سایت صفحه‌ها را موقتاً محدود کرده، کمی بعد "
                                  "دوباره بزنید): ")
                                 + str(ex).splitlines()[0][:160])
+                        break
+                    if site_id and parsed.site_question_id == site_id:
+                        matched, matched_page = parsed, page_no
                         break
                     if parsed.options and normalize_options(parsed.options) == row["signature"]:
                         matched = parsed
@@ -185,17 +219,39 @@ def audit_answers(
                     else:
                         update_conn = get_connection(db_path)
                         try:
-                            _save(update_conn, row, submitted)
+                            _save(update_conn, row, submitted, store_assets)
                         finally:
                             update_conn.close()
                         on_log(f"{label}: پاسخ گزینهٔ {submitted.correct_index} ذخیره شد.")
                     result["found"] += 1
+                elif submitted is not None and submitted.explanation_text:
+                    # No key on this page, but the lesson arrived: store it.
+                    if not dry_run:
+                        update_conn = get_connection(db_path)
+                        try:
+                            _save(update_conn, row, submitted, store_assets)
+                        finally:
+                            update_conn.close()
+                    result["still_missing"] += 1
+                    on_log(f"{label}: درس‌نامه ذخیره شد ولی سایت پاسخی نشان نداد.")
                 else:
                     result["still_missing"] += 1
                     result["locked"] += int(
                         submitted is not None
                         and str(getattr(submitted.explanation_status, "value", "")) == "locked")
                     on_log(f"{label}: سایت پاسخی نشان نداد (احتمالاً فقط با اشتراک پرو).")
+
+                # A plan/quota wall is not a per-question failure: stop and say
+                # how much of the queue is left, so the user resumes later.
+                try:
+                    body = page.locator("body").inner_text(timeout=8000)
+                except PlaywrightError:
+                    body = ""
+                if any(ph in body for ph in LIMIT_PHRASES) or document_status(page) == 429:
+                    result["status"] = "limit"
+                    on_log("سایت سقف/محدودیت امروز را اعلام کرد — ترمیم متوقف شد؛ "
+                           "هر چه تا اینجا ذخیره شد مانده است. فردا دوباره بزن.")
+                    break
                 time.sleep(max(0.0, delay))
         finally:
             context.close()
@@ -204,16 +260,29 @@ def audit_answers(
     return result
 
 
-def _save(conn, row: dict, parsed) -> None:
+def _save(conn, row: dict, parsed, store_assets=None) -> None:
     """Write only the fields this pass actually recovered."""
+    if store_assets is not None:
+        try:
+            store_assets(conn, parsed)
+        except Exception as ex:
+            # A missing mind-map must not throw away the recovered lesson.
+            applog.log(f"[audit] assets for question {row['id']} failed: {ex}")
     explanation_html = parsed.explanation_html or row.get("explanation_html")
     explanation_text = parsed.explanation_text or row.get("explanation_text")
+    votes = parsed.vote_percent_json() if any(
+        v is not None for v in (parsed.vote_percent or [])) else None
     conn.execute(
         "UPDATE questions SET correct_index = ?, answer_source = ?, "
         "explanation_html = ?, explanation_text = ?, explanation_status = ?, "
+        "vote_percent_json = coalesce(?, vote_percent_json), "
+        "has_images = max(has_images, ?), "
+        # The lesson on this row now comes from the signed-in session.
+        "fetched_as = 'login', "
         "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (parsed.correct_index, parsed.answer_source.value,
          explanation_html, explanation_text,
-         parsed.explanation_status.value, row["id"]),
+         parsed.explanation_status.value, votes,
+         int(bool(parsed.images and explanation_html)), row["id"]),
     )
     conn.commit()

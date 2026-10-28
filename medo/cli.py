@@ -499,6 +499,31 @@ def diagnose_live(
                   "(data/diag is git-ignored).[/dim]")
 
 
+@app.command(name="doctor")
+def doctor_cmd(
+    deep: bool = typer.Option(False, "--deep", help="Also open one question page and check the site's question id"),
+    topic: int = typer.Option(1, "--topic", help="Topic used by --deep"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite database path"),
+):
+    """One Persian verdict: can a download work right now, and if not why."""
+    from medo import doctor
+
+    result = doctor.run_checks(db_path, deep=deep, topic=topic)
+    table = Table(title="بررسی آمادگی", header_style="bold magenta")
+    table.add_column("بررسی", style="cyan")
+    table.add_column("وضعیت", justify="center")
+    table.add_column("توضیح")
+    for check in result["checks"]:
+        table.add_row(check["name"], "✓" if check["ok"] else "×", check["detail"])
+    console.print(table)
+
+    color = {"ready": "green", "auth": "yellow"}.get(result["verdict"], "red")
+    console.print(f"[bold {color}]{result['message']}[/bold {color}]")
+    if result["verdict"] == "network":
+        console.print(f"[dim]{result['help']}[/dim]")
+        raise typer.Exit(code=1)
+
+
 @app.command(name="check-site-ids")
 def check_site_ids(
     topic: int = typer.Option(..., "--topic", "-t", help="Topic ID to open (e.g. 15)"),

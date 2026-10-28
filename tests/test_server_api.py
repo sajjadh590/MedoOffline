@@ -403,3 +403,53 @@ def test_truncated_subtopic_is_sent_back_to_page_one(tmp_path):
     conn.close()
     assert state["last_page"] == 0
     assert state["status"] == "paused"
+
+
+def test_bank_health_reports_the_repair_queue(live_server):
+    """A guest row is «نیازمند ترمیم» even though it has an answer."""
+    port, db = live_server
+    conn = get_connection(db)
+    conn.execute(
+        "INSERT INTO questions (topic_id, source_url, source_page, ordinal, "
+        "content_hash, stem_html, stem_text, options_json, answer_source, "
+        "explanation_status, fetched_as) VALUES "
+        "(79, 'u', 1, 1, 'h1', '<p>س</p>', 'س', '[]', 'unknown', 'unknown', 'guest')"
+    )
+    conn.commit()
+    conn.close()
+
+    status, payload = _request(port, "GET", "/api/bank/health")
+    assert status == 200
+    health = json.loads(payload)
+    assert health["total"] == 1
+    assert health["needs_repair"] == 1
+
+
+def test_pdf_build_is_local_and_takes_the_job_slot(monkeypatch, tmp_path):
+    """The printable book is built on demand and never waits on the network."""
+    import medo.doctor
+    import medo.pdf
+
+    monkeypatch.setattr(medo.doctor, "quick_gate",
+                        lambda *a, **k: (False, "شبکه قطع است"))
+    gate = threading.Event()
+
+    def slow_export(**kwargs):
+        gate.wait(5)
+        return tmp_path / "medo_test_book.pdf"
+
+    monkeypatch.setattr(medo.pdf, "export_pdf", slow_export)
+
+    controller = ScraperTaskController()
+    ok, _ = controller.start_pdf_build()
+    assert ok, "a broken network must not block local PDF rendering"
+    assert controller.job == "pdf"
+
+    # A second click must not start a second job over the first.
+    refused, message = controller.start_pdf_build()
+    assert refused is False and message
+
+    gate.set()
+    controller.thread.join(timeout=5)
+    assert controller.status == "completed"
+    assert controller.is_running is False

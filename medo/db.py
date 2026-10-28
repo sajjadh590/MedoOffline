@@ -278,6 +278,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             cur.execute(
                 "ALTER TABLE questions ADD COLUMN site_question_id INTEGER;"
             )
+        # Which session read this page: 'login' pages carry the Pro lesson and
+        # the key, 'guest' pages often do not.  The repair queue is built from
+        # this, so a downgraded row can be upgraded once the user logs in.
+        if "fetched_as" not in cols:
+            cur.execute(
+                "ALTER TABLE questions ADD COLUMN fetched_as TEXT NOT NULL "
+                "DEFAULT 'unknown';"
+            )
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_questions_site_id "
             "ON questions(site_question_id) WHERE site_question_id IS NOT NULL;"
@@ -341,6 +349,7 @@ def upsert_question(
     tag_id: Optional[int] = None,
     subtopic_title: Optional[str] = None,
     download_bytes: int = 0,
+    fetched_as: str = "unknown",
 ) -> int:
     """
     Insert or update a parsed question and record where it was found.
@@ -417,6 +426,7 @@ def upsert_question(
                     tag_id = CASE WHEN tag_id IS NULL THEN ? ELSE tag_id END,
                     subtopic_title = coalesce(subtopic_title, ?),
                     download_bytes = CASE WHEN ? > 0 THEN ? ELSE download_bytes END,
+                    fetched_as = CASE WHEN ? <> 'unknown' THEN ? ELSE fetched_as END,
                     updated_at = ?
                 WHERE id = ?
             """, (
@@ -441,6 +451,8 @@ def upsert_question(
                 subtopic_title,
                 int(download_bytes or 0),
                 int(download_bytes or 0),
+                str(fetched_as or "unknown"),
+                str(fetched_as or "unknown"),
                 now,
                 qid,
             ))
@@ -452,8 +464,9 @@ def upsert_question(
                     correct_index, answer_source, vote_percent_json,
                     explanation_html, explanation_text, explanation_status,
                     has_images, category_path, tag_id, subtopic_title,
-                    download_bytes, site_question_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    download_bytes, site_question_id, fetched_as,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 topic_id,
                 q.source_url,
@@ -475,6 +488,7 @@ def upsert_question(
                 subtopic_title,
                 int(download_bytes or 0),
                 site_id,
+                str(fetched_as or "unknown"),
                 now,
                 now,
             ))
@@ -614,6 +628,46 @@ def count_untagged_questions(conn: sqlite3.Connection) -> int:
         ).fetchone()[0] or 0)
     except sqlite3.OperationalError:
         return 0
+
+
+# A question still needs the signed-in session when the key is missing, the
+# lesson is absent/partial/locked, or the page was stored as a guest.
+NEEDS_REPAIR_SQL = (
+    "fetched_as <> 'login'"
+    " OR correct_index IS NULL"
+    " OR explanation_text IS NULL"
+    " OR explanation_status IN ('locked', 'key_only', 'unknown')"
+)
+
+
+def count_needing_repair(conn: sqlite3.Connection) -> int:
+    """How many stored questions the Pro session could still improve."""
+    try:
+        return int(conn.execute(
+            f"SELECT count(*) FROM questions WHERE {NEEDS_REPAIR_SQL}"
+        ).fetchone()[0] or 0)
+    except sqlite3.OperationalError:
+        return 0
+
+
+def questions_needing_repair(
+    conn: sqlite3.Connection, limit: Optional[int] = None,
+) -> list[dict]:
+    """The repair queue, oldest first, with what it takes to re-locate a page."""
+    sql = (
+        "SELECT id, topic_id, tag_id, site_question_id, source_page, ordinal, "
+        "       stem_text, options_json, correct_index, explanation_html, "
+        "       explanation_text, explanation_status, fetched_as "
+        f"FROM questions WHERE {NEEDS_REPAIR_SQL} ORDER BY id"
+    )
+    args: list = []
+    if limit:
+        sql += " LIMIT ?"
+        args.append(int(limit))
+    try:
+        return [dict(row) for row in conn.execute(sql, args).fetchall()]
+    except sqlite3.OperationalError:
+        return []
 
 
 def get_question_by_id(conn: sqlite3.Connection, qid: int) -> Optional[dict]:

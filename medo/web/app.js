@@ -138,6 +138,8 @@
     bankHealthText: document.getElementById('bankHealthText'),
     auditAnswersBtn: document.getElementById('auditAnswersBtn'),
     syncTagsBtn: document.getElementById('syncTagsBtn'),
+    doctorBtn: document.getElementById('doctorBtn'),
+    pdfBtn: document.getElementById('pdfBtn'),
     // Session strip
     sessionHeadline: document.getElementById('sessionHeadline'),
     sessionFill: document.getElementById('sessionFill'),
@@ -1297,7 +1299,8 @@
     // «ادامه» belongs to downloads only; a finished repair must not offer it.
     const resumable = !running && Boolean(st.can_resume) && job === 'scrape';
     const jobTitle = job === 'answers' ? 'بازیابی پاسخ‌ها'
-      : (job === 'tags' ? 'پخش سوال‌ها در زیرمبحث‌ها' : 'دانلود سوالات');
+      : (job === 'tags' ? 'پخش سوال‌ها در زیرمبحث‌ها'
+        : (job === 'pdf' ? 'ساخت PDF کتاب' : 'دانلود سوالات'));
 
     if (running) {
       elements.dlDockTitle.textContent = stopping
@@ -1312,6 +1315,10 @@
       elements.dlDockTitle.textContent = 'بازیابی پاسخ‌ها تمام شد';
     } else if (job === 'tags') {
       elements.dlDockTitle.textContent = 'زیرمبحث‌ها به‌روزرسانی شد';
+    } else if (job === 'pdf') {
+      elements.dlDockTitle.textContent = st.status === 'completed'
+        ? 'فایل PDF ساخته شد — dist/medo_test_book.pdf'
+        : 'ساخت PDF متوقف شد — ' + scrapeStatusLabel(st.status);
     } else if (st.status === 'completed') {
       elements.dlDockTitle.textContent = 'دانلود تمام شد — ' + toPersianDigits(st.scraped_count || 0) + ' سوال';
     } else {
@@ -1322,7 +1329,9 @@
       ? toPersianDigits(st.scraped_count || 0) + ' پاسخ بازیابی شد'
       : (job === 'tags'
         ? 'نتیجه در گزارش پایین'
-        : toPersianDigits(st.scraped_count || 0) + ' سوال ذخیره شد');
+        : (job === 'pdf'
+          ? 'خروجی در پوشهٔ dist'
+          : toPersianDigits(st.scraped_count || 0) + ' سوال ذخیره شد'));
     elements.dlDockPage.textContent = resumable
       ? toPersianDigits(st.pending_count || 0) + ' مبحث ادامه‌پذیر'
       : '';
@@ -1350,6 +1359,9 @@
       if (h.untagged) {
         parts.push(toPersianDigits(h.untagged) + ' بدون زیرمبحث');
       }
+      if (h.needs_repair) {
+        parts.push(toPersianDigits(h.needs_repair) + ' نیازمند ترمیم');
+      }
       elements.bankHealthText.textContent = parts.join(' · ');
       elements.auditAnswersBtn.disabled = !h.missing_answers;
       elements.auditAnswersBtn.textContent = h.missing_answers
@@ -1365,9 +1377,13 @@
   }
 
   /** Run one repair job; it uses the same status/log panel as a download. */
-  async function runBankRepair(path, job) {
+  async function runBankRepair(path, job, body) {
     try {
-      const resp = await fetch(path, { method: 'POST' });
+      const resp = await fetch(path, {
+        method: 'POST',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
       const data = await resp.json();
       if (!data.ok) {
         elements.bankHealthText.textContent = data.message || 'اجرا ممکن نشد.';
@@ -2569,6 +2585,36 @@
     if (elements.syncTagsBtn) {
       elements.syncTagsBtn.addEventListener('click',
         () => runBankRepair('/api/tags/sync', 'tags'));
+    }
+    if (elements.pdfBtn) {
+      elements.pdfBtn.addEventListener('click', () => {
+        // One category when the tree is filtered to a single topic, else the
+        // whole bank; a whole-bank book is the slow one, so say which it is.
+        const f = state.treeFilter;
+        const only = (f && f.ids && f.ids.size === 1) ? Number([...f.ids][0]) : 0;
+        const topicId = only > 0 ? only : null;
+        elements.pdfBtn.disabled = true;
+        runBankRepair('/api/pdf', 'pdf', { topic_id: topicId })
+          .finally(() => { elements.pdfBtn.disabled = false; });
+      });
+    }
+    if (elements.doctorBtn) {
+      elements.doctorBtn.addEventListener('click', async () => {
+        elements.doctorBtn.disabled = true;
+        elements.bankHealthText.textContent = 'در حال بررسی شبکه…';
+        try {
+          const resp = await fetch('/api/doctor', { cache: 'no-store' });
+          const result = await resp.json();
+          const failed = (result.checks || []).filter(c => !c.ok).map(c => c.detail);
+          elements.bankHealthText.textContent = result.message
+            + (failed.length ? ' — ' + failed.join(' | ') : '')
+            + (result.verdict === 'network' ? ' ' + result.help : '');
+        } catch (e) {
+          elements.bankHealthText.textContent = 'سرور محلی در دسترس نیست.';
+        } finally {
+          elements.doctorBtn.disabled = false;
+        }
+      });
     }
     elements.loginHelperBtn.addEventListener('click', async () => {
       try {

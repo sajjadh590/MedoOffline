@@ -27,6 +27,7 @@ from medo.db import (
     get_database_stats,
     get_question_by_id,
     clear_run_request,
+    count_needing_repair,
     count_node_questions,
     count_untagged_questions,
     declared_questions,
@@ -48,7 +49,6 @@ from medo.db import (
 from medo.exporter import export_web_bundle
 from medo.paths import DEFAULT_ASSETS_DIR as ASSETS_DIR
 from medo.paths import DIST_DIR, PROJECT_ROOT
-from medo.pdf import export_pdf
 from medo.scraper import Harvester
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -66,6 +66,10 @@ class ScraperTaskController:
     """Manages background scraping execution and progress reporting."""
 
     def __init__(self):
+        # ThreadingHTTPServer runs every request in its own thread: the
+        # check-then-set of the single job slot needs a real lock or two
+        # clicks can both pass the check.
+        self._job_lock = threading.Lock()
         self.is_running = False
         self.status = "idle"
         self.topic_id = 0
@@ -224,15 +228,27 @@ class ScraperTaskController:
         subtopic_title: str | None = None,
         targets: list[dict] | None = None,
     ) -> tuple[bool, str]:
-        # A finished run's thread may still be exporting the bundle; starting
-        # a second one then opened two browsers on the same DB.
-        if self.is_running or (self.thread is not None and self.thread.is_alive()):
-            return False, "عملیات استخراج در حال حاضر در حال اجرا است."
-
         wanted = self._normalize_targets(topic_id, topic_ids, tag_id,
                                          subtopic_title, targets)
         if not wanted:
             return False, "مبحثی برای استخراج انتخاب نشده است."
+
+        # No run should end with 0 saved because the path to the site is
+        # broken: say which part is broken instead of starting anyway.
+        from medo import doctor
+        network_ok, verdict = doctor.quick_gate(db_path)
+        if not network_ok:
+            self._push(verdict)
+            applog.log(f"[doctor] scrape blocked: {verdict}")
+            return False, verdict
+
+        # A finished run's thread may still be exporting the bundle; starting
+        # a second one then opened two browsers on the same DB.
+        with self._job_lock:
+            if self.is_running or (self.thread is not None and self.thread.is_alive()):
+                return False, "عملیات استخراج در حال حاضر در حال اجرا است."
+            self.is_running = True   # the slot is taken under the lock
+
         wanted = self._expand_subtopics(db_path, wanted)
         multi = len(wanted) > 1
         # Prefer the tree's own subtitle: it is what the sidebar shows and it
@@ -251,7 +267,6 @@ class ScraperTaskController:
         except Exception as ex:
             applog.log(f"[scrape] could not resolve subtopic titles: {ex}")
 
-        self.is_running = True
         self.status = "running"
         self.job = "scrape"
         self.cancel_requested = False
@@ -421,12 +436,9 @@ class ScraperTaskController:
                         self._push("بانک آفلاین و وب‌اپلیکیشن به‌روزرسانی شد.")
                     except Exception as ex:
                         self._push(f"خطا در به‌روزرسانی خروجی وب: {ex}")
-                    try:
-                        pdf_path = DIST_DIR / "medo_test_book.pdf"
-                        export_pdf(output_path=pdf_path, db_path=db_path, partial=True)
-                        self._push("فایل PDF کتاب سوالات به‌روزرسانی شد (dist/medo_test_book.pdf).")
-                    except Exception as ex:
-                        self._push(f"خطا در ساخت PDF: {ex}")
+                    # The printable book is built only when «PDF» is pressed
+                    # (or `medo build-pdf`): rebuilding the whole bank's PDF
+                    # after every run cost minutes for a file nobody opened.
             except Exception as ex:
                 self.status = "error"
                 self._push(f"خطا در استخراج: {ex}")
@@ -669,11 +681,13 @@ class ScraperTaskController:
 
     # -- bank repair jobs (answers / subtopic tags) -------------------------
 
-    def _begin_repair(self, job: str, message: str, db_path) -> bool:
-        """Take the single job slot for a repair run (same status endpoint)."""
-        if self.is_running or (self.thread is not None and self.thread.is_alive()):
-            return False
-        self.is_running = True
+    def _take_slot(self, job: str, message: str,
+                   db_path=DEFAULT_DB_PATH) -> tuple[bool, str]:
+        """Take the single job slot; False when another job already holds it."""
+        with self._job_lock:
+            if self.is_running or (self.thread is not None and self.thread.is_alive()):
+                return False, "عملیات دیگری در حال اجراست."
+            self.is_running = True
         self.status = "running"
         self.job = job
         self.topic_id = 0
@@ -684,7 +698,18 @@ class ScraperTaskController:
         self.logs = []
         self.log_seq = 0
         self._push(message)
-        return True
+        return True, message
+
+    def _begin_repair(self, job: str, message: str, db_path) -> tuple[bool, str]:
+        """Slot for a job that needs the site: refuse when the path is broken."""
+        from medo import doctor
+
+        network_ok, verdict = doctor.quick_gate(db_path)
+        if not network_ok:
+            self._push(verdict)
+            applog.log(f"[doctor] {job} blocked: {verdict}")
+            return False, verdict
+        return self._take_slot(job, message, db_path)
 
     def _rebuild_after_repair(self, db_path) -> None:
         """Repair changes are invisible on the phone until its bundle is new."""
@@ -703,31 +728,50 @@ class ScraperTaskController:
             self._push(f"خطا در ساخت بانک گوشی: {ex}")
 
     def start_answers_audit(self, db_path=DEFAULT_DB_PATH) -> tuple[bool, str]:
-        """Re-read questions that were stored without a correct option."""
-        from medo.answer_audit import audit_answers, missing_questions
+        """One resumable «ترمیم پاسخ‌ها و درس‌نامه‌ها» job."""
+        from medo.answer_audit import audit_answers, repair_queue
+        from medo.auth import has_storage_state
 
         conn = get_connection(db_path)
         try:
-            pending = len(missing_questions(conn))
+            pending = len(repair_queue(conn))
         finally:
             conn.close()
         if not pending:
-            return False, "همهٔ سوالات بانک پاسخ دارند؛ چیزی برای بازیابی نمانده است."
-        if not self._begin_repair("answers",
-                                  f"بازیابی پاسخ {pending} سوال بدون پاسخ...",
-                                  db_path):
-            return False, "عملیات دیگری در حال اجراست."
+            return False, "همهٔ سوال‌های بانک کامل‌اند؛ چیزی در صف ترمیم نیست."
+        if not has_storage_state():
+            return False, ("برای ترمیم باید وارد حساب شوی: اول «ورود با مرورگر» را "
+                           f"بزن. ({pending} سوال در صف است.)")
+        started, reason = self._begin_repair(
+            "answers", f"ترمیم {pending} سوال (پاسخ و درس‌نامه)...", db_path)
+        if not started:
+            return False, reason
 
         def _worker():
             try:
                 res = audit_answers(db_path, on_log=self._push,
                                     should_stop=lambda: self.cancel_requested)
                 self.scraped_count = int(res["found"])
-                self.status = "interrupted" if self.cancel_requested else "completed"
+                if res.get("status") == "limit":
+                    self.status = "limit"
+                else:
+                    self.status = ("interrupted" if self.cancel_requested
+                                   else "completed")
+                remaining = 0
+                try:
+                    conn = get_connection(db_path)
+                    try:
+                        from medo.answer_audit import repair_queue
+                        remaining = len(repair_queue(conn))
+                    finally:
+                        conn.close()
+                except Exception:
+                    pass
                 self._push(
-                    f"پایان بازیابی: {res['found']} پاسخ پیدا و ذخیره شد، "
-                    f"{res['still_missing']} سوال هنوز بدون پاسخ است"
-                    + (f" ({res['skipped']} صفحه پیدا نشد)." if res["skipped"] else ".")
+                    f"پایان ترمیم: {res['found']} سوال کامل شد، "
+                    f"{res['still_missing']} سوال هنوز پاسخ/درس‌نامه کم دارد"
+                    + (f" ({res['skipped']} صفحه پیدا نشد)" if res["skipped"] else "")
+                    + (f"؛ {remaining} سوال در صف مانده." if remaining else ".")
                 )
                 if res["found"]:
                     self._rebuild_after_repair(db_path)
@@ -748,9 +792,10 @@ class ScraperTaskController:
 
     def start_tag_sync(self, db_path=DEFAULT_DB_PATH) -> tuple[bool, str]:
         """Map stored questions to their subtopics (existing backfill script)."""
-        if not self._begin_repair("tags",
-                                  "پخش سوالات در زیرمبحث‌ها شروع شد...", db_path):
-            return False, "عملیات دیگری در حال اجراست."
+        started, reason = self._begin_repair(
+            "tags", "پخش سوالات در زیرمبحث‌ها شروع شد...", db_path)
+        if not started:
+            return False, reason
 
         def _worker():
             script = PROJECT_ROOT / "scripts" / "backfill_tags.py"
@@ -798,6 +843,36 @@ class ScraperTaskController:
         self.thread = threading.Thread(target=_worker, daemon=True)
         self.thread.start()
         return True, "پخش سوالات در زیرمبحث‌ها شروع شد؛ نتیجه در همین پنجره می‌آید."
+
+    def start_pdf_build(self, db_path=DEFAULT_DB_PATH,
+                        topic_id: int | None = None) -> tuple[bool, str]:
+        """Build the printable book only when asked (never after every run)."""
+        # Rendering happens locally, so this job must not wait on the network.
+        started, reason = self._take_slot(
+            "pdf", "ساخت فایل PDF کتاب سوالات شروع شد...", db_path)
+        if not started:
+            return False, reason
+
+        def _worker():
+            try:
+                from medo.pdf import export_pdf
+
+                out = DIST_DIR / "medo_test_book.pdf"
+                export_pdf(output_path=out, db_path=db_path,
+                           topic_id=int(topic_id) if topic_id else None,
+                           partial=True)
+                self.status = "completed"
+                self._push(f"فایل PDF ساخته شد: {out}")
+            except Exception as ex:
+                self.status = "error"
+                self._push(f"خطا در ساخت PDF: {ex}")
+                applog.log(f"[pdf] traceback:\n{traceback.format_exc()}")
+            finally:
+                self.is_running = False
+
+        self.thread = threading.Thread(target=_worker, daemon=True)
+        self.thread.start()
+        return True, "ساخت PDF شروع شد؛ نتیجه در همین پنجره می‌آید."
 
     @staticmethod
     def _count_questions(db_path: Path | str = DEFAULT_DB_PATH) -> int:
@@ -1356,6 +1431,7 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
                 # A question counts as classified when ANY node of it is a
                 # subtopic; the old question.tag_id column holds only one.
                 untagged = count_untagged_questions(conn)
+                needs_repair = count_needing_repair(conn)
                 subtopics = conn.execute(
                     "SELECT count(*) FROM categories WHERE source_url LIKE '%?tag=%'"
                 ).fetchone()[0]
@@ -1365,7 +1441,13 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
                              "missing_answers": int(missing),
                              "untagged": int(untagged),
                              "tagged": int(total) - int(untagged),
+                             "needs_repair": int(needs_repair),
                              "subtopics": int(subtopics)})
+            return
+
+        if parsed.path == "/api/doctor":
+            from medo import doctor
+            self._send_json(doctor.run_checks(self.db_path))
             return
 
         if parsed.path == "/api/scrape/status":
@@ -1554,6 +1636,18 @@ class MedoRequestHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/tags/sync":
             ok, msg = SCRAPER_CONTROLLER.start_tag_sync(self.db_path)
+            self._send_json({"ok": ok, "message": msg})
+            return
+
+        if parsed.path == "/api/pdf":
+            # The printable book is built when asked, for the selected
+            # category when there is one (one huge PDF after every run was
+            # minutes of work for a file nobody opened).
+            try:
+                topic_id = int(data.get("topic_id") or 0) or None
+            except (TypeError, ValueError):
+                topic_id = None
+            ok, msg = SCRAPER_CONTROLLER.start_pdf_build(self.db_path, topic_id)
             self._send_json({"ok": ok, "message": msg})
             return
 
