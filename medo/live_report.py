@@ -20,7 +20,7 @@ from typing import Optional
 
 from medo.db import (DEFAULT_DB_PATH, count_needing_repair,
                      count_node_questions, declared_questions, get_connection,
-                     tag_id_of)
+                     repair_reason_counts, tag_id_of)
 
 # Log lines that carry a useful number, and nothing paid.  Each pattern only
 # extracts digits, so even an unexpected line cannot leak lesson text.
@@ -44,7 +44,7 @@ def log_facts(log_path: Path | str) -> dict:
         "drift": 0, "drift_position": 0, "drift_harvest": 0,
         "last_requested": None, "last_shown": None,
         "throttles": 0, "last_429": None, "last_429_tag": None,
-        "pace": None, "pace_event": None,
+        "pace": None, "pace_event": None, "throttle_events": [],
     }
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -60,14 +60,34 @@ def log_facts(log_path: Path | str) -> dict:
         # A Playwright traceback also contains "line 429"; it is not an event.
         if "429" in line and 'File "' not in line:
             facts["throttles"] += 1
-            facts["last_429"] = _stamp(line)
+            stamp = _stamp(line)
             tag = _TAG_RE.search(line)
+            facts["last_429"] = stamp
             facts["last_429_tag"] = int(tag.group(1)) if tag else None
+            facts["throttle_events"].append({
+                "stamp": stamp, "tag": int(tag.group(1)) if tag else None,
+                "pace": facts["pace"],
+            })
         pace = _PACE_RE.search(line)
         if pace:
             facts["pace"] = (float(pace.group(1)), float(pace.group(2)))
             facts["pace_event"] = _stamp(line)
     return facts
+
+
+def _recent_throttles(events: list[dict], days: int = 7) -> list[dict]:
+    """Events inside the last `days`; a malformed stamp is kept and shown ?."""
+    cutoff = time.time() - days * 86400
+    recent: list[dict] = []
+    for event in events:
+        try:
+            when = time.mktime(time.strptime(event["stamp"], "%Y-%m-%d %H:%M:%S"))
+        except (TypeError, ValueError):
+            recent.append(event)
+            continue
+        if when >= cutoff:
+            recent.append(event)
+    return recent
 
 
 def db_facts(conn: sqlite3.Connection, worst: int = 5) -> dict:
@@ -83,6 +103,23 @@ def db_facts(conn: sqlite3.Connection, worst: int = 5) -> dict:
         "SELECT count(DISTINCT question_id) FROM question_nodes")
     with_site_id = one(
         "SELECT count(*) FROM questions WHERE site_question_id IS NOT NULL")
+    source_page_zero = one(
+        "SELECT count(*) FROM questions WHERE coalesce(source_page, 0) = 0")
+    causes: dict[str, int] = {}
+    try:
+        for row in conn.execute(
+                "SELECT CASE "
+                "  WHEN coalesce(topic_id, 0) = 0 THEN 'no_topic' "
+                "  WHEN coalesce(source_page, 0) = 0 THEN 'no_page' "
+                "  WHEN options_json IS NULL OR options_json IN ('', '[]') "
+                "       THEN 'no_options' "
+                "  ELSE 'unmatched' END AS cause, count(*) AS n "
+                "FROM questions WHERE site_question_id IS NULL "
+                "GROUP BY cause"):
+            causes[str(row["cause"])] = int(row["n"])
+    except sqlite3.OperationalError:
+        causes = {}
+    reasons = repair_reason_counts(conn)
 
     subtopics: list[dict] = []
     try:
@@ -114,6 +151,9 @@ def db_facts(conn: sqlite3.Connection, worst: int = 5) -> dict:
         "with_site_id": with_site_id,
         "without_site_id": max(total - with_site_id, 0),
         "repair_queue": count_needing_repair(conn),
+        "repair_reasons": reasons,
+        "source_page_zero": source_page_zero,
+        "site_id_causes": causes,
         "subtopics": len(subtopics),
         "subtopics_started": len(started),
         "subtopics_done": len(started) - len(incomplete),
@@ -181,7 +221,18 @@ def build_report(
             f"questions: {facts['total']} total; nodes {facts['with_nodes']} "
             f"have / {facts['without_nodes']} missing; site id "
             f"{facts['with_site_id']} have / {facts['without_site_id']} missing")
-        lines.append(f"repair queue: {facts['repair_queue']}")
+        causes = facts.get("site_id_causes") or {}
+        if causes:
+            lines.append(
+                f"site id gaps: no page {causes.get('no_page', 0)}, "
+                f"no topic {causes.get('no_topic', 0)}, "
+                f"no options {causes.get('no_options', 0)}, "
+                f"unmatched {causes.get('unmatched', 0)}; "
+                f"source_page=0 rows {facts.get('source_page_zero', 0)}")
+        reasons = facts.get("repair_reasons") or []
+        detail = ", ".join(f"{r['reason']} {r['count']}" for r in reasons)
+        lines.append(f"repair queue: {facts['repair_queue']}"
+                     + (f" ({detail})" if detail else ""))
     else:
         lines.append("questions: database not found or empty")
 
@@ -190,6 +241,15 @@ def build_report(
         if logs["last_429_tag"]:
             tail += f" (tag {logs['last_429_tag']})"
         lines.append(f"429s: {logs['throttles']} event(s){tail}")
+        recent = _recent_throttles(logs.get("throttle_events") or [])
+        if recent:
+            lines.append("429s last 7 days:")
+            for event in recent[-10:]:
+                pace = event.get("pace")
+                delay = (f"{pace[0]:.1f}-{pace[1]:.1f} s/page"
+                         if pace else "unknown delay")
+                where = f" (tag {event['tag']})" if event.get("tag") else ""
+                lines.append(f"  - {event['stamp']}{where} at {delay}")
     else:
         lines.append("429s: none in the log")
 

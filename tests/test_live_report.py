@@ -105,3 +105,48 @@ def test_report_survives_a_missing_database_and_log(tmp_path):
     assert "database not found" in text
     assert "doctor: not run" in text           # no doctor dict was passed
     assert "pace: 1.5-3.0 s per page" in text
+
+
+def test_site_id_gaps_and_repair_reasons_are_counted(tmp_path):
+    from medo.db import mark_repair_waiting
+
+    conn = _db(tmp_path)
+    row = conn.execute(
+        "SELECT id FROM questions WHERE site_question_id IS NULL "
+        "ORDER BY id LIMIT 1").fetchone()
+    mark_repair_waiting(conn, row["id"], "locked")
+    # A row that can never receive a site id: no stored page number.
+    no_page = _question("سوال بدون صفحه", None)
+    no_page.source_page = 0
+    upsert_question(conn, no_page, topic_id=78, fetched_as="guest")
+    facts = db_facts(conn)
+    conn.close()
+
+    assert facts["source_page_zero"] == 1
+    assert facts["site_id_causes"]["no_page"] == 1
+    assert facts["site_id_causes"]["unmatched"] >= 1
+    assert {"reason": "locked", "count": 1} in facts["repair_reasons"]
+
+    text = build_report(tmp_path / "medo.db", tmp_path / "missing.log")
+    assert "source_page=0 rows 1" in text
+    assert "repair queue: 3 (" in text
+    assert "locked 1" in text
+
+
+def test_recent_429_events_show_the_delay_in_force(tmp_path):
+    path = tmp_path / "medo.log"
+    path.write_text(
+        "2026-10-28 18:08:25 [pace] 50 clean pages — 1.4-2.7s per page\n"
+        "2026-10-28 18:09:00 [ui] page 4: HTTP 429\n"
+        "2026-10-28 18:09:05 [pace] site throttled — pausing 12s, then 2.8-5.4s per page\n"
+        "2026-10-28 18:10:00 [ui] page 4: HTTP 429\n",
+        encoding="utf-8")
+    facts = log_facts(path)
+    assert len(facts["throttle_events"]) == 2
+    assert facts["throttle_events"][0]["pace"] == (1.4, 2.7)
+    assert facts["throttle_events"][1]["pace"] == (2.8, 5.4)
+
+    text = build_report(tmp_path / "missing.db", path)
+    assert "429s last 7 days:" in text
+    assert "2026-10-28 18:09:00 at 1.4-2.7 s/page" in text
+    assert "2026-10-28 18:10:00 at 2.8-5.4 s/page" in text
