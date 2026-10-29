@@ -553,6 +553,21 @@ public final class Bank {
         }
     }
 
+    /**
+     * The «بانک من» tree: only branches that hold at least one stored
+     * question.  Ancestors of a non-empty subtopic stay visible; an empty
+     * subtopic is omitted.  Derived from the same question nodes the bundle
+     * already carries, so it needs no extra export field.
+     */
+    public void flattenStored(List<Node> nodes, List<Node> out) {
+        for (Node n : nodes) {
+            if (countFor(n) > 0) {
+                out.add(n);
+                flattenStored(n.children, out);
+            }
+        }
+    }
+
     /** Every node, regardless of the expanded flags — used by search. */
     public static void flattenAll(List<Node> nodes, List<Node> out) {
         for (Node n : nodes) {

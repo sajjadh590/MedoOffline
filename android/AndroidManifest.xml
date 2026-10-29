@@ -6,7 +6,7 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="ir.medo.app"
-    android:versionCode="3"
+    android:versionCode="5"
     android:versionName="1.2">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="30" />
@@ -64,5 +64,12 @@
             android:label="@string/app_name"
             android:parentActivityName=".BrowseActivity"
             android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- Appearance: five reading themes and four text sizes. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:parentActivityName=".MainActivity" />
     </application>
 </manifest>

@@ -91,7 +91,7 @@ public final class ScanActivity extends Activity
 
     private View build() {
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(Color.BLACK);
+        root.setBackgroundColor(Ui.CAMERA_BG);
 
         surface = new SurfaceView(this);
         root.addView(surface, new FrameLayout.LayoutParams(
@@ -99,10 +99,10 @@ public final class ScanActivity extends Activity
         surface.getHolder().addCallback(this);
 
         LinearLayout top = Ui.row(this);
-        top.setBackgroundColor(0xCC000000);
+        top.setBackgroundColor(Ui.CAMERA_OVERLAY);
         top.setPadding(Ui.dp(this, Ui.S2), Ui.dp(this, Ui.S2),
                 Ui.dp(this, Ui.S2), Ui.dp(this, Ui.S2));
-        TextView close = Ui.iconButton(this, "\u2039", 30, Color.WHITE);
+        TextView close = Ui.iconButton(this, "\u2039", 30, Ui.CAMERA_TEXT);
         Ui.describe(close, "بستن اسکنر");
         close.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -114,9 +114,9 @@ public final class ScanActivity extends Activity
 
         LinearLayout texts = Ui.column(this);
         texts.setPadding(Ui.dp(this, Ui.S2), 0, Ui.dp(this, Ui.S1), 0);
-        TextView title = Ui.bold(this, "اسکن QR", 19, Color.WHITE);
+        TextView title = Ui.bold(this, "اسکن QR", 19, Ui.CAMERA_TEXT);
         texts.addView(title);
-        hint = Ui.text(this, "کد QR کامپیوتر را داخل کادر بگیر", Ui.T_SM, 0xFFB9C4CF);
+        hint = Ui.text(this, "کد QR کامپیوتر را داخل کادر بگیر", Ui.T_SM, Ui.CAMERA_HINT);
         hint.setPadding(0, Ui.dp(this, 2), 0, 0);
         texts.addView(hint);
         top.addView(texts, Ui.weight(1f));
@@ -127,7 +127,7 @@ public final class ScanActivity extends Activity
         GradientDrawable border = new GradientDrawable();
         border.setColor(Color.TRANSPARENT);
         border.setCornerRadius(Ui.dp(this, 16));
-        border.setStroke(Ui.dp(this, 2), 0xFF2DD4A7);
+        border.setStroke(Ui.dp(this, 2), Ui.CAMERA_ACCENT);
         frame.setBackground(border);
         int side = Ui.dp(this, 240);
         FrameLayout.LayoutParams fp = new FrameLayout.LayoutParams(side, side);
@@ -135,10 +135,10 @@ public final class ScanActivity extends Activity
         root.addView(frame, fp);
 
         TextView bottom = Ui.text(this,
-                "دریافت بانک یا به‌روزرسانی برنامه", Ui.T_SM, 0xFFB9C4CF);
+                "دریافت بانک یا به‌روزرسانی برنامه", Ui.T_SM, Ui.CAMERA_HINT);
         bottom.setGravity(Gravity.CENTER);
         bottom.setPadding(0, Ui.dp(this, Ui.S4), 0, Ui.dp(this, Ui.S4));
-        bottom.setBackgroundColor(0xCC000000);
+        bottom.setBackgroundColor(Ui.CAMERA_OVERLAY);
         root.addView(bottom, frameParams(Gravity.BOTTOM, -1, -2));
         return root;
     }

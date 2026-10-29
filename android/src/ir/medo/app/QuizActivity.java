@@ -53,6 +53,7 @@ public final class QuizActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Ui.apply(this);
         state = new StateStore(new File(getFilesDir(), "state.json"));
         bank = Bank.cached();
         if (bank == null) {
@@ -79,6 +80,17 @@ public final class QuizActivity extends Activity {
         quiz.goTo(getIntent().getIntExtra(EXTRA_START_INDEX, 0));
         setContentView(build());
         render();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Theme/size changed in Settings: rebuild the views in place so the
+        // reader stays on the same question instead of returning to the start.
+        if (quiz != null && Ui.apply(this)) {
+            setContentView(build());
+            render();
+        }
     }
 
     private List<Question> resolveQuestions() {
@@ -364,8 +376,7 @@ public final class QuizActivity extends Activity {
             row.setLayoutParams(rowParams);
 
             TextView marker = Ui.text(this, Ui.fa(option.index), Ui.T_SM,
-                    answered && isCorrect ? Ui.ACCENT_INK
-                            : (answered && isPicked ? 0xFFFFFFFF : Ui.TEXT_2));
+                    answered && (isCorrect || isPicked) ? Ui.INK : Ui.TEXT_2);
             marker.setGravity(Gravity.CENTER);
             marker.setTypeface(Typeface.DEFAULT_BOLD);
             marker.setBackground(Ui.circle(this,
@@ -500,7 +511,10 @@ public final class QuizActivity extends Activity {
         }
         try {
             @SuppressWarnings("deprecation")
-            CharSequence parsed = Html.fromHtml(html);
+            // LessonText keeps table cells apart and gives long tokens a
+            // break opportunity, so a 30k-character lesson renders all of
+            // itself inside the scroll view instead of one clipped block.
+            CharSequence parsed = Html.fromHtml(LessonText.prepareHtml(html));
             return parsed == null || parsed.length() == 0 ? (plain == null ? "" : plain) : parsed;
         } catch (RuntimeException e) {
             return plain == null ? "" : plain;

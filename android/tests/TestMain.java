@@ -41,6 +41,9 @@ public final class TestMain {
         urlParsing();
         taggedCounts();
         sharedQuestionNodes();
+        myBank();
+        themes();
+        lessonText();
         searchNormalization();
         scanTargets();
         qrDecoding();
@@ -505,6 +508,130 @@ public final class TestMain {
         eq("question keeps all nodes", 3, bank.questions.get(0).nodes.size());
     }
 
+    /** «بانک من» is the desktop tree tab: only branches that hold questions. */
+    private static void myBank() {
+        String json = "{\"format\":\"medo-bank\",\"version\":1,\"generated_at\":\"\","
+                + "\"stats\":{\"total\":2,\"with_answer\":2},"
+                + "\"tree\":["
+                + "{\"id\":1,\"parent_id\":null,\"kind\":\"topic\",\"title\":\"پرشده\","
+                + "\"source_url\":\"/qbank/topic-id-9\",\"position\":1,\"question_count\":2,"
+                + "\"children\":["
+                + "{\"id\":2,\"parent_id\":1,\"kind\":\"subtopic\",\"title\":\"دارد\","
+                + "\"source_url\":\"/qbank/topic-id-9?tag=5\",\"position\":1,"
+                + "\"question_count\":2,\"children\":[]},"
+                + "{\"id\":3,\"parent_id\":1,\"kind\":\"subtopic\",\"title\":\"خالی\","
+                + "\"source_url\":\"/qbank/topic-id-9?tag=6\",\"position\":2,"
+                + "\"question_count\":0,\"children\":[]}]},"
+                + "{\"id\":4,\"parent_id\":null,\"kind\":\"topic\",\"title\":\"خالی\","
+                + "\"source_url\":\"/qbank/topic-id-10\",\"position\":2,\"question_count\":0,"
+                + "\"children\":[]},"
+                + "{\"id\":5,\"parent_id\":null,\"kind\":\"category\",\"title\":\"شاخه\","
+                + "\"source_url\":\"/qbank/cat-id-2\",\"position\":3,\"question_count\":1,"
+                + "\"children\":["
+                + "{\"id\":6,\"parent_id\":5,\"kind\":\"topic\",\"title\":\"زیرشاخه\","
+                + "\"source_url\":\"/qbank/topic-id-11\",\"position\":1,"
+                + "\"question_count\":1,\"children\":[]}]}],"
+                + "\"questions\":[" + question(1, 5) + "," + question(2, 5) + ","
+                + "{\"id\":3,\"topic_id\":11,\"tag_id\":0,"
+                + "\"nodes\":[{\"topic_id\":11,\"tag_id\":0}],"
+                + "\"source_url\":\"/qbank/topic-id-11\",\"page\":1,\"ordinal\":3,"
+                + "\"stem_html\":\"<p>س</p>\",\"stem_text\":\"س\","
+                + "\"options\":[{\"index\":1,\"text\":\"الف\"},"
+                + "{\"index\":2,\"text\":\"ب\"}],"
+                + "\"correct\":1,\"answer_source\":\"color\"}]}";
+        Bank bank = Bank.parse(json);
+        List<Node> mine = new ArrayList<>();
+        bank.flattenStored(bank.roots, mine);
+        List<String> titles = new ArrayList<>();
+        for (Node n : mine) {
+            titles.add(n.title);
+        }
+        check("mine: filled topic stays", titles.contains("پرشده"));
+        check("mine: its filled subtopic stays", titles.contains("دارد"));
+        check("mine: its empty subtopic is hidden", !titles.contains("خالی"));
+        check("mine: an empty topic is hidden", !titles.contains("خالی"));
+        check("mine: an ancestor of a filled topic stays", titles.contains("شاخه"));
+        check("mine: the filled descendant stays", titles.contains("زیرشاخه"));
+        eq("mine: every row is a stored branch", 4, mine.size());
+
+        List<Node> all = new ArrayList<>();
+        Bank.flatten(bank.roots, all);
+        check("all: the full tree is still reachable", all.size() > mine.size());
+    }
+
+    /** Every reading theme defines every token and keeps AA text contrast. */
+    private static void themes() {
+        eq("every theme is listed", 5, Theme.KEYS.length);
+        eq("every theme has a label", Theme.KEYS.length, Theme.LABELS.length);
+        for (String key : Theme.KEYS) {
+            Theme.Palette p = Theme.get(key);
+            eq(key + ": key round-trips", key, p.key);
+            eq(key + ": defines every token", Theme.TOKENS.length, Theme.values(p).length);
+            List<String> failures = Theme.contrastFailures(p);
+            check(key + ": text contrast >= 4.5 (" + failures + ")", failures.isEmpty());
+            check(key + ": two surfaces differ", p.SURFACE != p.SURFACE_2);
+        }
+        eq("an unknown key falls back to dark", Theme.DARK, Theme.get("nope").key);
+        check("light is not dark", !Theme.isDark(Theme.LIGHT));
+        check("sepia is not dark", !Theme.isDark(Theme.SEPIA));
+        check("amoled is dark", Theme.isDark(Theme.AMOLED));
+    }
+
+    /**
+     * The lesson that used to render half-cut on the phone: a 30k-character
+     * explanation with a wide table, a 500-character token with no space in
+     * it, nested lists and an image.
+     */
+    private static void lessonText() {
+        StringBuilder lesson = new StringBuilder(40000);
+        lesson.append("<div>");
+        for (int i = 0; i < 400; i++) {
+            lesson.append("<p>پاراگراف توضیحی شمارهٔ ").append(i)
+                    .append(" دربارهٔ این سوال که باید تا آخرین کلمه خوانده شود")
+                    .append(" و هیچ بخشی از آن از قلم نیفتد.</p>");
+        }
+        lesson.append("<table><tr><th>ستون یک</th><th>ستون دو</th><th>ستون سه</th></tr>")
+                .append("<tr><td>الف</td><td>ب</td><td>ج</td></tr></table>");
+        StringBuilder token = new StringBuilder();
+        for (int i = 0; i < 500; i++) {
+            token.append((char) ('A' + (i % 26)));
+        }
+        lesson.append("<p>").append(token).append("</p>");
+        lesson.append("<ul><li>یک</li><li>دو<ul><li>دو-یک</li></ul></li></ul>");
+        lesson.append("<p><img src=\"https://example.invalid/a/very/long/path/")
+                .append("image-name-that-is-replaced.png\" alt=\"شکل\"></p>");
+        lesson.append("<p><a href=\"https://example.invalid/a/very/long/path/")
+                .append("link-name-that-must-not-be-edited.html\">پیوند</a></p>");
+        lesson.append("</div>");
+        String html = lesson.toString();
+        check("lesson: the fixture really is huge", html.length() > 30000);
+
+        String prepared = LessonText.prepareHtml(html);
+        check("lesson: table tags are gone", !prepared.contains("<td")
+                && !prepared.contains("<th") && !prepared.contains("<tr")
+                && !prepared.contains("<table") && !prepared.contains("</table"));
+        check("lesson: cells stay apart", prepared.contains("ستون یک · ستون دو"));
+        check("lesson: list items are marked", prepared.contains("• یک"));
+        check("lesson: an image becomes a visible placeholder",
+                prepared.contains(LessonText.IMAGE));
+        check("lesson: a long href is not broken up", prepared.contains(
+                "link-name-that-must-not-be-edited.html"));
+        check("lesson: no run longer than " + LessonText.MAX_RUN
+                + " (was " + LessonText.longestRun(prepared) + ")",
+                LessonText.longestRun(prepared) <= LessonText.MAX_RUN);
+
+        String visible = LessonText.visible(prepared);
+        check("lesson: the long token is intact, only breaks added",
+                visible.contains(token.toString()));
+        check("lesson: every paragraph survives",
+                visible.contains("پاراگراف توضیحی شمارهٔ 399")
+                        && visible.contains("و هیچ بخشی از آن از قلم نیفتد"));
+        eq("lesson: preparing twice adds nothing", prepared,
+                LessonText.prepareHtml(prepared));
+        check("lesson: empty input is safe", LessonText.prepareHtml(null).isEmpty()
+                && LessonText.breakRuns("").isEmpty());
+    }
+
     private static String question(int id, int tag) {
         return "{\"id\":" + id + ",\"topic_id\":9,\"tag_id\":" + tag + ","
                 + "\"source_url\":\"/qbank/topic-id-9?tag=" + tag + "\",\"page\":1,"
@@ -675,8 +802,10 @@ public final class TestMain {
 
             List<Question> random = bank.random(20);
             check("random returns at most 20", random.size() <= 20);
+            // A light index entry carries no options by design, so the check
+            // has to go through the same hydration the quiz screen uses.
             check("random picks answerable questions",
-                    random.isEmpty() || random.get(0).options.size() >= 2);
+                    random.isEmpty() || bank.question(random.get(0).id).options.size() >= 2);
 
             try {
                 Bank.parse("{\"format\":\"something-else\",\"version\":1}");

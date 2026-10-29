@@ -31,6 +31,8 @@ javac -encoding UTF-8 -nowarn -cp "$(cygpath -w "$ZXING")" -d "$OUT" \
     "$HERE/src/ir/medo/app/MiniJson.java" \
     "$HERE/src/ir/medo/app/Question.java" \
     "$HERE/src/ir/medo/app/Node.java" \
+    "$HERE/src/ir/medo/app/Theme.java" \
+    "$HERE/src/ir/medo/app/LessonText.java" \
     "$HERE/src/ir/medo/app/Bank.java" \
     "$HERE/src/ir/medo/app/Quiz.java" \
     "$HERE/src/ir/medo/app/ScanTarget.java" \

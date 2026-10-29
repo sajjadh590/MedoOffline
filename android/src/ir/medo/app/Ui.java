@@ -1,6 +1,7 @@
 package ir.medo.app;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.provider.Settings;
@@ -21,31 +22,54 @@ import android.widget.TextView;
 public final class Ui {
 
     // ------------------------------------------------------------------ colour
-    public static final int INK = 0xFF0B0F14;
-    public static final int BG = INK;
-    public static final int SURFACE = 0xFF141A21;
-    public static final int SURFACE_2 = 0xFF1B232C;
-    public static final int SURFACE_HI = SURFACE_2;       // older call sites
-    public static final int SURFACE_3 = 0xFF232C36;
-    public static final int LINE = 0xFF26313C;
-    public static final int LINE_STRONG = 0xFF35414E;
+    // These are the *active* tokens, replaced by applyTheme() before a screen
+    // is built.  They are deliberately not final: the Settings screen changes
+    // them and the activity is recreated, so every existing call site keeps
+    // reading a central token instead of a hard-coded colour.
+    public static int INK;
+    public static int BG;
+    public static int SURFACE;
+    public static int SURFACE_2;
+    public static int SURFACE_HI;       // older call sites
+    public static int SURFACE_3;
+    public static int LINE;
+    public static int LINE_STRONG;
 
-    public static final int TEXT = 0xFFEDF2F7;
-    public static final int TEXT_2 = 0xFFA7B4C2;
-    public static final int DIM = TEXT_2;
-    public static final int TEXT_3 = 0xFF7C8B9A;
-    public static final int MUTED = TEXT_3;
+    public static int TEXT;
+    public static int TEXT_2;
+    public static int DIM;
+    public static int TEXT_3;
+    public static int MUTED;
 
-    public static final int ACCENT = 0xFF2DD4A7;
-    public static final int ACCENT_BG = 0xFF0C2A24;
-    public static final int ACCENT_INK = 0xFF07130F;
+    public static int ACCENT;
+    public static int ACCENT_BG;
+    public static int ACCENT_INK;
 
-    public static final int OK = 0xFF46C46A;
-    public static final int OK_BG = 0xFF10281A;
-    public static final int BAD = 0xFFFF6B62;
-    public static final int BAD_BG = 0xFF2C1618;
-    public static final int WARN = 0xFFE0AE3C;
-    public static final int WARN_BG = 0xFF2A2113;
+    public static int OK;
+    public static int OK_BG;
+    public static int BAD;
+    public static int BAD_BG;
+    public static int WARN;
+    public static int WARN_BG;
+    public static int PRESSED;
+    public static int ACCENT_STROKE;
+
+    // Camera screens stay dark whatever the reading theme: a black viewfinder
+    // is functional, not a canvas for sepia.
+    public static final int CAMERA_BG = 0xFF000000;
+    public static final int CAMERA_OVERLAY = 0xCC000000;
+    public static final int CAMERA_TEXT = 0xFFFFFFFF;
+    public static final int CAMERA_HINT = 0xFFB9C4CF;
+    public static final int CAMERA_ACCENT = 0xFF2DD4A7;
+
+    public static final String PREFS = "medo";
+    public static final String PREF_THEME = "theme";
+    public static final String PREF_FONT_SCALE = "font_scale";
+    public static final float[] FONT_SCALES = {0.9f, 1.0f, 1.15f, 1.3f};
+    public static final String[] FONT_LABELS = {"کوچک", "متوسط", "بزرگ", "خیلی بزرگ"};
+
+    private static String activeTheme = Theme.DARK;
+    private static float activeScale = 1.0f;
 
     // ------------------------------------------------------------------ spacing
     public static final int S1 = 4;
@@ -62,17 +86,109 @@ public final class Ui {
     public static final float R_PANEL = 18f;
 
     // --------------------------------------------------------------------- type
-    public static final float T_XS = 11f;
-    public static final float T_SM = 12f;
-    public static final float T_BODY = 13f;
-    public static final float T_UI = 15f;
-    public static final float T_STEM = 17f;
-    public static final float T_TITLE = 22f;
-    public static final float T_DISPLAY = 28f;
+    private static final float BASE_XS = 11f;
+    private static final float BASE_SM = 12f;
+    private static final float BASE_BODY = 13f;
+    private static final float BASE_UI = 15f;
+    private static final float BASE_STEM = 17f;
+    private static final float BASE_TITLE = 22f;
+    private static final float BASE_DISPLAY = 28f;
+
+    public static float T_XS;
+    public static float T_SM;
+    public static float T_BODY;
+    public static float T_UI;
+    public static float T_STEM;
+    public static float T_TITLE;
+    public static float T_DISPLAY;
 
     public static final int TOUCH = 48;
 
+    static {
+        applyTheme(Theme.DARK, 1.0f);
+    }
+
     private Ui() {
+    }
+
+    // ------------------------------------------------------------------- theme
+
+    /** Apply the saved theme/font before building a screen.
+     *
+     * Returns true when the active values changed, so an activity can recreate
+     * itself after the Settings screen instead of needing an app restart.
+     */
+    public static boolean apply(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS,
+                Context.MODE_PRIVATE);
+        String key = prefs.getString(PREF_THEME, Theme.DARK);
+        float scale = prefs.getFloat(PREF_FONT_SCALE, 1.0f);
+        if (key.equals(activeTheme) && Math.abs(scale - activeScale) < 0.001f) {
+            return false;
+        }
+        applyTheme(key, scale);
+        return true;
+    }
+
+    public static void applyTheme(String key, float scale) {
+        Theme.Palette p = Theme.get(key);
+        INK = p.INK;
+        BG = p.INK;
+        SURFACE = p.SURFACE;
+        SURFACE_2 = p.SURFACE_2;
+        SURFACE_HI = p.SURFACE_2;
+        SURFACE_3 = p.SURFACE_3;
+        LINE = p.LINE;
+        LINE_STRONG = p.LINE_STRONG;
+        TEXT = p.TEXT;
+        TEXT_2 = p.TEXT_2;
+        DIM = p.TEXT_2;
+        TEXT_3 = p.TEXT_3;
+        MUTED = p.TEXT_3;
+        ACCENT = p.ACCENT;
+        ACCENT_BG = p.ACCENT_BG;
+        ACCENT_INK = p.ACCENT_INK;
+        OK = p.OK;
+        OK_BG = p.OK_BG;
+        BAD = p.BAD;
+        BAD_BG = p.BAD_BG;
+        WARN = p.WARN;
+        WARN_BG = p.WARN_BG;
+        PRESSED = p.PRESSED;
+        ACCENT_STROKE = p.ACCENT_STROKE;
+
+        float s = Math.max(0.8f, Math.min(1.5f, scale));
+        T_XS = BASE_XS * s;
+        T_SM = BASE_SM * s;
+        T_BODY = BASE_BODY * s;
+        T_UI = BASE_UI * s;
+        T_STEM = BASE_STEM * s;
+        T_TITLE = BASE_TITLE * s;
+        T_DISPLAY = BASE_DISPLAY * s;
+        activeTheme = p.key;
+        activeScale = s;
+    }
+
+    public static void setTheme(Context context, String key) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(PREF_THEME, Theme.get(key).key).apply();
+    }
+
+    public static void setFontScale(Context context, float scale) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putFloat(PREF_FONT_SCALE, scale).apply();
+    }
+
+    public static String themeKey() {
+        return activeTheme;
+    }
+
+    public static float fontScale() {
+        return activeScale;
+    }
+
+    public static boolean isDark() {
+        return Theme.isDark(activeTheme);
     }
 
     // ------------------------------------------------------------------ metrics

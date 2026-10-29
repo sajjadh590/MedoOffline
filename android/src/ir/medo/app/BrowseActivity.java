@@ -65,6 +65,7 @@ public final class BrowseActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Ui.apply(this);
         state = new StateStore(new File(getFilesDir(), "state.json"));
         bank = Bank.cached();
         if (bank == null) {
@@ -98,6 +99,12 @@ public final class BrowseActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // A theme or text size picked in Settings applies to this screen too,
+        // without restarting the app.
+        if (Ui.apply(this)) {
+            recreate();
+            return;
+        }
         state.load();
         rebuild();
     }

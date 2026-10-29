@@ -42,6 +42,9 @@ public final class MainActivity extends Activity {
     private static final int RANDOM_COUNT = 20;
     private static final String PREFS = "medo";
     private static final String PREF_LAST_NODE = "last_node";
+    private static final String PREF_TREE_MODE = "tree_mode";
+    private static final String MODE_MINE = "mine";
+    private static final String MODE_ALL = "all";
 
     private Bank bank;
     private StateStore state;
@@ -56,6 +59,9 @@ public final class MainActivity extends Activity {
     private LinearLayout resumeCard;
     private TextView resumeTitle;
     private EditText search;
+    private TextView mineTab;
+    private TextView allTab;
+    private String treeMode = MODE_MINE;
 
     private final List<Node> rows = new ArrayList<>();
     private RowAdapter adapter;
@@ -64,6 +70,12 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Ui.apply(this);
+        treeMode = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(PREF_TREE_MODE, MODE_MINE);
+        if (!MODE_ALL.equals(treeMode)) {
+            treeMode = MODE_MINE;
+        }
         state = new StateStore(new File(getFilesDir(), "state.json"));
         setContentView(build());
         load();
@@ -72,6 +84,10 @@ public final class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (Ui.apply(this)) {
+            recreate();
+            return;
+        }
         // QuizActivity writes through its own StateStore, so re-read the file.
         state.load();
         if (adapter != null) {
@@ -112,6 +128,16 @@ public final class MainActivity extends Activity {
         counter = Ui.pill(this, "—", Ui.ACCENT_BG, Ui.ACCENT, Ui.T_SM);
         titleRow.addView(counter);
 
+        TextView settingsButton = Ui.iconButton(this, "\u2699", 19, Ui.TEXT_2);
+        Ui.describe(settingsButton, "تنظیمات و ظاهر برنامه");
+        settingsButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
+        });
+        titleRow.addView(settingsButton);
+
         // Import lives here instead of eating one of the two main actions.
         TextView importButton = Ui.iconButton(this, "\u21E9", 20, Ui.TEXT_2);
         Ui.describe(importButton, "دریافت بانک");
@@ -139,10 +165,13 @@ public final class MainActivity extends Activity {
         addStatDivider(stats);
         statAccuracy = addStat(stats, "—", "دقت");
         header.addView(stats, Ui.matchWrap());
+        header.addView(buildTreeTabs(), Ui.margins(this,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 0, Ui.S2, 0, 0));
 
         // Resume card appears only when a section was opened before.
         resumeCard = Ui.row(this);
-        resumeCard.setBackground(Ui.outlined(this, Ui.ACCENT_BG, Ui.R_CONTROL, 0x332DD4A7, 1));
+        resumeCard.setBackground(Ui.outlined(this, Ui.ACCENT_BG, Ui.R_CONTROL, Ui.ACCENT_STROKE, 1));
         resumeCard.setPadding(Ui.dp(this, Ui.S3), Ui.dp(this, Ui.S2),
                 Ui.dp(this, Ui.S3), Ui.dp(this, Ui.S2));
         resumeCard.setVisibility(View.GONE);
@@ -197,6 +226,57 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, 0, Ui.S2, 0, 0));
 
         return header;
+    }
+
+    /** «بانک من» vs «همهٔ دسته‌ها», mirroring the desktop tree tabs. */
+    private View buildTreeTabs() {
+        LinearLayout tabs = Ui.row(this);
+        tabs.setBackground(Ui.rounded(this, Ui.SURFACE, Ui.R_CONTROL));
+        tabs.setPadding(Ui.dp(this, 3), Ui.dp(this, 3),
+                Ui.dp(this, 3), Ui.dp(this, 3));
+        mineTab = Ui.chip(this, "بانک من", Ui.ACCENT, Ui.ACCENT_INK);
+        allTab = Ui.chip(this, "همهٔ دسته‌ها", Ui.SURFACE, Ui.TEXT_2);
+        mineTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setTreeMode(MODE_MINE);
+            }
+        });
+        allTab.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setTreeMode(MODE_ALL);
+            }
+        });
+        Ui.describe(mineTab, "فقط دسته‌هایی که سوال دارند");
+        Ui.describe(allTab, "همهٔ دسته‌های سایت");
+        tabs.addView(mineTab, Ui.weight(1f));
+        tabs.addView(Ui.gap(this, Ui.S1));
+        tabs.addView(allTab, Ui.weight(1f));
+        boolean mine = MODE_MINE.equals(treeMode);
+        if (!mine) {
+            mineTab.setBackground(Ui.rounded(this, Ui.SURFACE, Ui.R_CONTROL));
+            mineTab.setTextColor(Ui.TEXT_2);
+            allTab.setBackground(Ui.rounded(this, Ui.ACCENT, Ui.R_CONTROL));
+            allTab.setTextColor(Ui.ACCENT_INK);
+        }
+        return tabs;
+    }
+
+    private void setTreeMode(String mode) {
+        treeMode = MODE_ALL.equals(mode) ? MODE_ALL : MODE_MINE;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_TREE_MODE, treeMode).apply();
+        if (mineTab != null && allTab != null) {
+            boolean mine = MODE_MINE.equals(treeMode);
+            mineTab.setBackground(Ui.rounded(this,
+                    mine ? Ui.ACCENT : Ui.SURFACE, Ui.R_CONTROL));
+            mineTab.setTextColor(mine ? Ui.ACCENT_INK : Ui.TEXT_2);
+            allTab.setBackground(Ui.rounded(this,
+                    mine ? Ui.SURFACE : Ui.ACCENT, Ui.R_CONTROL));
+            allTab.setTextColor(mine ? Ui.TEXT_2 : Ui.ACCENT_INK);
+        }
+        rebuildRows();
     }
 
     private TextView addStat(LinearLayout parent, String value, String caption) {
@@ -310,7 +390,7 @@ public final class MainActivity extends Activity {
         row.setPadding(0, Ui.dp(this, Ui.S1), 0, 0);
         TextView n = Ui.text(this, number, Ui.T_XS, Ui.ACCENT);
         n.setGravity(Gravity.CENTER);
-        n.setBackground(Ui.circle(this, Ui.ACCENT_BG, 0x332DD4A7, 0));
+        n.setBackground(Ui.circle(this, Ui.ACCENT_BG, Ui.ACCENT_STROKE, 0));
         n.setLayoutParams(Ui.lp(Ui.dp(this, 20), Ui.dp(this, 20)));
         row.addView(n);
         TextView body = Ui.text(this, text, Ui.T_SM, Ui.TEXT_2);
@@ -357,7 +437,7 @@ public final class MainActivity extends Activity {
     private StateListDrawable pressedSelector() {
         StateListDrawable selector = new StateListDrawable();
         selector.addState(new int[]{android.R.attr.state_pressed},
-                new ColorDrawable(0xFF1F2933));
+                new ColorDrawable(Ui.PRESSED));
         selector.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
         return selector;
     }
@@ -394,7 +474,13 @@ public final class MainActivity extends Activity {
         rows.clear();
         if (bank != null) {
             if (query.isEmpty()) {
-                Bank.flatten(bank.roots, rows);
+                if (MODE_MINE.equals(treeMode)) {
+                    // Only branches that actually hold downloaded questions:
+                    // the same meaning as «بانک من» in the desktop tree.
+                    bank.flattenStored(bank.roots, rows);
+                } else {
+                    Bank.flatten(bank.roots, rows);
+                }
             } else {
                 List<Node> all = new ArrayList<>();
                 Bank.flattenAll(bank.roots, all);
