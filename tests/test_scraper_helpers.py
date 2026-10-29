@@ -114,6 +114,40 @@ class TestFinalizeState:
         assert state["error_message"] == "guest quota exhausted"
 
 
+class TestLiveStats:
+    """The UI/CLI numbers must come from counted documents, not guesses."""
+
+    def test_request_rate_delay_429_and_hourly_rate(self, tmp_path):
+        import time
+
+        from medo.scraper import Harvester
+
+        h = Harvester(db_path=tmp_path / "medo.db", delay_range=(2.0, 3.0))
+        now = time.monotonic()
+        h._request_times.extend([now - 70, now - 20, now - 5, now])
+        h.requests_total = 4
+        h.questions_total = 30
+        h.run_started = now - 1800          # 30 minutes
+        h.expected_total = 60
+        stats = h.stats()
+        assert stats["requests_per_minute"] == 3   # the 70 s sample expired
+        assert stats["delay_low"] == 2.0 and stats["delay_high"] == 3.0
+        assert stats["questions_per_hour"] == 60
+        assert stats["eta_seconds"] == 1800
+
+    def test_a_learned_range_is_used_on_the_next_run(self, tmp_path):
+        from medo.db import get_connection, init_db, save_pace_state
+        from medo.scraper import Harvester
+
+        db = tmp_path / "medo.db"
+        conn = get_connection(db)
+        init_db(conn)
+        conn.close()
+        save_pace_state(db, 2.6, 4.0, ceiling=2.6)
+        h = Harvester(db_path=db)
+        assert h.pace.range == (2.6, 4.0)
+
+
 class TestMeasuredBytes:
     """Per-question traffic must be a typical question, not the app shell."""
 

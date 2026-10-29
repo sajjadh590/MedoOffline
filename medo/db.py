@@ -160,6 +160,17 @@ def init_db(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_log(started_at);"
         )
 
+        # Small key/value store for learned behaviour that must survive a
+        # restart: today the adaptive pace (the range and the learned ceiling
+        # after a 429), later the daily data budget.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # The download the user started last (targets + limits).  Kept in the
         # database so a login/continuation still knows what to continue after
         # the app is restarted.
@@ -716,6 +727,68 @@ def clear_repair_waiting(conn: sqlite3.Connection, question_id: int) -> None:
         (int(question_id),),
     )
     conn.commit()
+
+
+def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Store one small preference/learned value (survives restarts)."""
+    conn.execute(
+        "INSERT INTO app_settings(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = CURRENT_TIMESTAMP",
+        (str(key), str(value)),
+    )
+    conn.commit()
+
+
+def get_setting(conn: sqlite3.Connection, key: str,
+                default: Optional[str] = None) -> Optional[str]:
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (str(key),)
+        ).fetchone()
+        return row[0] if row else default
+    except sqlite3.OperationalError:
+        return default
+
+
+def get_pace_state(db_path: Path | str = DEFAULT_DB_PATH) -> dict:
+    """The learned delay range, or an empty dict for a fresh archive."""
+    try:
+        conn = get_connection(db_path)
+        try:
+            raw = get_setting(conn, "pace_state")
+        finally:
+            conn.close()
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        low = float(data.get("low") or 0)
+        high = float(data.get("high") or 0)
+        ceiling = float(data.get("ceiling") or 0)
+        if low <= 0 or high < low:
+            return {}
+        return {"low": low, "high": high,
+                "ceiling": ceiling or high, "updated_at": data.get("updated_at")}
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return {}
+
+
+def save_pace_state(db_path: Path | str, low: float, high: float,
+                    ceiling: float) -> None:
+    """Persist the range the next run must start from."""
+    try:
+        conn = get_connection(db_path)
+        try:
+            set_setting(conn, "pace_state", json.dumps({
+                "low": round(float(low), 3), "high": round(float(high), 3),
+                "ceiling": round(float(ceiling or high), 3),
+                "updated_at": datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat(),
+            }))
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        pass
 
 
 def count_needing_repair(conn: sqlite3.Connection) -> int:

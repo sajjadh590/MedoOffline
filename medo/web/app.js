@@ -99,6 +99,8 @@
     treeFilterValue: document.getElementById('treeFilterValue'),
     treeTabs: document.querySelectorAll('.tree-tab'),
     treeMineCount: document.getElementById('treeMineCount'),
+    scrapeStatsText: document.getElementById('scrapeStatsText'),
+    dlDockStats: document.getElementById('dlDockStats'),
     resumeScrapeBtn: document.getElementById('resumeScrapeBtn'),
     breadcrumbBar: document.getElementById('breadcrumbBar'),
     imageModal: document.getElementById('imageModal'),
@@ -1419,6 +1421,7 @@
     elements.dlDockResumeBtn.hidden = !resumable;
     elements.dlDockBar.classList.toggle('live', running && !stopping);
     elements.dlDockDot.classList.toggle('live', running && !stopping);
+    renderScrapeStats(st);
 
     // Finished: show the result long enough to be read, then leave the corner.
     if (!running && !resumable && !dockHideTimer) {
@@ -1742,6 +1745,32 @@
     return SCRAPE_STATUS_FA[status] || (status || 'نامشخص');
   }
 
+  /** Live pacing/cost numbers; the server sends counts only, never page text. */
+  function scrapeStatsLine(st) {
+    const s = st && st.stats;
+    if (!s) return '';
+    const parts = [];
+    parts.push(toPersianDigits(s.requests_per_minute || 0) + ' درخواست/دقیقه');
+    parts.push('تأخیر ' + toPersianDigits((s.delay_low || 0).toFixed(1))
+      + '–' + toPersianDigits((s.delay_high || 0).toFixed(1)) + ' ثانیه');
+    parts.push('۴۲۹ امروز ' + toPersianDigits(s.throttles_429_today || 0));
+    parts.push(toPersianDigits(s.questions_per_hour || 0) + ' سوال/ساعت');
+    if (s.eta_seconds !== null && s.eta_seconds !== undefined) {
+      const mins = Math.max(1, Math.round(Number(s.eta_seconds) / 60));
+      parts.push('زمان تقریبی ' + toPersianDigits(mins) + ' دقیقه');
+    }
+    if (s.cooldown_seconds > 0) {
+      parts.push('توقف موقت ' + toPersianDigits(s.cooldown_seconds) + ' ثانیه');
+    }
+    return parts.join(' · ');
+  }
+
+  function renderScrapeStats(st) {
+    const line = scrapeStatsLine(st);
+    if (elements.scrapeStatsText) elements.scrapeStatsText.textContent = line;
+    if (elements.dlDockStats) elements.dlDockStats.textContent = line;
+  }
+
   function startScrapePolling() {
     if (scrapePollTimer) clearInterval(scrapePollTimer);
     scrapePollTimer = setInterval(async () => {
@@ -1756,6 +1785,7 @@
         ? 'در حال استخراج... صفحه ' + toPersianDigits(st.current_page || 0)
         : ('وضعیت: ' + scrapeStatusLabel(st.status));
       elements.scrapeCountText.textContent = toPersianDigits(st.scraped_count || 0) + ' سوال ذخیره شد';
+      renderScrapeStats(st);
       renderUsage(st);
       renderScrapeDock(st);
 

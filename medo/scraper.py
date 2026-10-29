@@ -28,6 +28,8 @@ import random
 import re
 import signal
 import time
+from collections import deque
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable, Optional
@@ -42,8 +44,10 @@ from medo.db import (
     DEFAULT_DB_PATH,
     get_asset_by_url,
     get_connection,
+    get_pace_state,
     get_scrape_state,
     init_db,
+    save_pace_state,
     topics_needing_refill,
     update_scrape_state,
     upsert_asset,
@@ -903,9 +907,16 @@ class Harvester:
 
         # One controller owns the pace: it widens on a 429 and settles after
         # clean pages, instead of a fixed range that is wrong in both
-        # directions.
-        self.pace = AdaptiveDelay(*delay_range, on_log=print)
+        # directions.  A previous run's learned range wins over the default:
+        # starting fast again after a 429 just repeats the failure.
+        learned = get_pace_state(self.db_path)
+        self.pace = AdaptiveDelay(
+            *delay_range, on_log=print,
+            learned=(learned.get("low"), learned.get("high")) if learned else None)
         self.delay_min, self.delay_max = self.pace.range
+        if learned:
+            print(f"[pace] starting from the learned range "
+                  f"{self.delay_min:.1f}-{self.delay_max:.1f}s per page")
         self.headless = headless
         self.on_progress = on_progress
         self.max_minutes = max_minutes
@@ -922,6 +933,16 @@ class Harvester:
         self._estimate_printed = False
         self._topic_paths: Optional[dict[str, str]] = None
         self._topics_classified: set[int] = set()
+        # Live stats (UI + CLI).  Only document requests are counted: the
+        # browser also fetches JS/CSS for the shell, which is not a page the
+        # site throttles.
+        self.requests_total = 0
+        self._request_times: deque[float] = deque(maxlen=600)
+        self._throttle_times: list[float] = []
+        self.questions_total = 0
+        self.expected_total = 0
+        self.cooldown_until = 0.0
+        self.cooldown_seconds = 0
 
     # -- signals / budgets ---------------------------------------------------
 
@@ -1046,7 +1067,68 @@ class Harvester:
         page = context.new_page()
         page.route("**/*", self._route_interceptor)
         page.on("response", self._on_response)
+        page.on("request", self._on_document_request)
         return browser, page
+
+    def _on_document_request(self, request) -> None:
+        """Count the pages the site can throttle (documents, not assets)."""
+        try:
+            if request.resource_type == "document":
+                self.requests_total += 1
+                self._request_times.append(time.monotonic())
+        except Exception:
+            pass
+
+    def _persist_pace(self) -> None:
+        """Remember the range/ceiling so the next run starts carefully."""
+        try:
+            save_pace_state(self.db_path, *self.pace.range,
+                            ceiling=self.pace.learned_ceiling or self.pace.high)
+        except Exception as ex:
+            applog.log(f"[pace] could not save learned range: {ex}")
+
+    def _start_cooldown(self, wait: float) -> None:
+        """Announce a 429 pause; the retry waits for the user/next run.
+
+        No request is sent while cooling down.  The UI reads
+        ``cooldown_seconds`` and shows the remaining time, so a 429 never
+        looks like a frozen app or an instant retry.
+        """
+        self.cooldown_seconds = int(max(0, round(wait)))
+        self.cooldown_until = time.time() + max(0.0, wait)
+        applog.log(f"[pace] cooling down {self.cooldown_seconds}s before the "
+                   "next request (no retry during the cool-down)")
+        print(f"[pace] cool-down: {self.cooldown_seconds}s — retry after that")
+
+    def stats(self) -> dict:
+        """Live, cheap numbers for the UI/CLI (no site request)."""
+        now = time.monotonic()
+        while self._request_times and now - self._request_times[0] > 60:
+            self._request_times.popleft()
+        elapsed_h = max(self.elapsed_minutes / 60.0, 1e-6)
+        midnights = datetime.now().replace(hour=0, minute=0, second=0,
+                                           microsecond=0).timestamp()
+        today_429 = sum(1 for t in self._throttle_times if t >= midnights)
+        done = int(self.questions_total)
+        rate = done / elapsed_h if self.elapsed_minutes > 0.05 else 0.0
+        eta = None
+        if self.expected_total > done and rate > 0:
+            eta = int((self.expected_total - done) / rate * 3600)
+        return {
+            "requests_total": int(self.requests_total),
+            "requests_per_minute": len(self._request_times),
+            "delay_low": round(self.pace.low, 2),
+            "delay_high": round(self.pace.high, 2),
+            "throttles_429_today": int(today_429),
+            "questions_total": done,
+            "questions_per_hour": int(round(rate)),
+            "expected_total": int(self.expected_total),
+            "eta_seconds": eta,
+            "cooldown_seconds": max(
+                0, int(round(self.cooldown_until - time.time())))
+            if self.cooldown_until else 0,
+            "learned_ceiling": round(self.pace.learned_ceiling or 0, 2),
+        }
 
     # -- page helpers --------------------------------------------------------
 
@@ -1316,29 +1398,37 @@ class Harvester:
         # the site restores the reader's remembered position: a subtopic run
         # then started 50 questions ahead, stored nothing, and marked itself
         # complete.
-        if load(topic_url(topic_id, page=target, tag_id=tag_id)):
-            cur, total = position()
-            if cur == target:
-                return cur
-            if total is not None and target > total:
-                # The counter says the list ends before the requested page:
-                # this target really is finished.  -1 means "complete", which
-                # the caller must not confuse with a navigation failure.
-                return -1
-            applog.log(f"[position] requested page {target}, site shows {cur}")
-        self._polite_delay()
-
-        if not load(topic_url(topic_id, page=1, tag_id=tag_id)):
+        if not load(topic_url(topic_id, page=target, tag_id=tag_id)):
+            # Do not fetch page 1 after a failed target load: that doubles the
+            # requests exactly when the site is already unhappy, and the error
+            # page is still on screen for the caller to classify.
             return None
         cur, total = position()
+        if cur == target:
+            return cur
+        if total is not None and target > total:
+            # The counter says the list ends before the requested page:
+            # this target really is finished.  -1 means "complete", which
+            # the caller must not confuse with a navigation failure.
+            return -1
         if cur is None:
-            # No counter at all: fall back to the historical behaviour of
-            # walking blindly.  Better than refusing to scrape at all.
-            for _ in range(1, target):
-                if self._next_state(page) != "ready" or not self._click_next(page):
-                    return None
-                self._polite_delay()
-            return target
+            # The target page loaded but had no counter: fall back to page 1
+            # once, then walk blindly if the counter is still missing.
+            self._polite_delay()
+            if not load(topic_url(topic_id, page=1, tag_id=tag_id)):
+                return None
+            cur, total = position()
+            if cur is None:
+                for _ in range(1, target):
+                    if self._next_state(page) != "ready" or not self._click_next(page):
+                        return None
+                    self._polite_delay()
+                return target
+            if total is not None and target > total:
+                return -1
+        else:
+            applog.log(f"[position] requested page {target}, site shows {cur} "
+                       "— walking from there instead of reloading page 1")
 
         if total is not None and target > total:
             return -1
@@ -1439,6 +1529,11 @@ class Harvester:
         self._question_times.append(time.monotonic())
         self._question_bytes.append(self._bytes_this_question)
         self._bytes_this_question = 0
+        self.questions_total += 1
+        # Persist the learned range periodically, not on every question: a
+        # crash should not lose the fact that a 429 happened.
+        if self.pace.clean_pages and self.pace.clean_pages % 25 == 0:
+            self._persist_pace()
         return qid
 
     def _maybe_print_estimate(self, scraped_count: int) -> None:
@@ -1453,12 +1548,19 @@ class Harvester:
         rate = (scraped_count / total_sec) if total_sec > 5 else sec_per_q
         eta_1k = (1000 / rate) / 60 if rate > 0 else float("inf")
         mb_total = self.bytes_total / (1024 * 1024)
+        stats = self.stats()
+        eta = (f"{stats['eta_seconds'] // 60} min"
+               if stats.get("eta_seconds") is not None else "unknown")
         print(
             f"\n[≈] Estimate after {scraped_count} questions: "
             f"{sec_per_q:.1f} s/question, {kb_per_q:.0f} KB/question, "
             f"session total {mb_total:.1f} MB in {self.elapsed_minutes:.1f} min\n"
             f"    → projected {eta_1k:.0f} min per 1000 questions "
-            f"at the current pace (incl. polite delays)."
+            f"at the current pace (incl. polite delays).\n"
+            f"    live: {stats['requests_per_minute']}/min, "
+            f"delay {stats['delay_low']:.1f}-{stats['delay_high']:.1f}s, "
+            f"429 today {stats['throttles_429_today']}, "
+            f"{stats['questions_per_hour']} q/hour, ETA {eta}"
         )
 
     # -- main loop ------------------------------------------------------------
@@ -1565,7 +1667,10 @@ class Harvester:
                             # Widen the pace before the retry the user makes
                             # after the pause: the next run starts wider only
                             # if it is the same process (the log says so).
-                            self.pace.throttled()
+                            wait = self.pace.throttled()
+                            self._throttle_times.append(time.time())
+                            self._persist_pace()
+                            self._start_cooldown(wait)
                         # What the site actually served, straight into the log:
                         # without it every failure read «could not position» and
                         # the real answer (429 / login / empty) was unknowable.
@@ -1639,6 +1744,15 @@ class Harvester:
                             kind = "auth"  # anti-bot redirect to the login page
                         elif guest_quota:
                             kind = "limit"
+                        if kind == "throttled" or document_status(page) == 429:
+                            wait = self.pace.throttled()
+                            self._throttle_times.append(time.time())
+                            self._persist_pace()
+                            self._start_cooldown(wait)
+                            raise ScraperStopped(
+                                "throttled",
+                                f"site rate-limited this connection — "
+                                f"cool-down {self.cooldown_seconds}s recorded")
                         if kind == "blocked":
                             raise ScraperStopped(
                                 "blocked",

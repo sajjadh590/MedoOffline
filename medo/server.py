@@ -101,6 +101,9 @@ class ScraperTaskController:
         # modal use it to describe the run correctly.
         self.job = ""
         self.cancel_requested = False
+        # Sum of declared-but-missing questions for the selected download; the
+        # harvester turns it into a live ETA.
+        self.expected_questions = 0
 
     def _push(self, msg: str) -> None:
         """One log entry for both audiences: the UI panel (memory) and the
@@ -320,6 +323,14 @@ class ScraperTaskController:
                     db_path=db_path,
                     on_progress=_on_progress,
                 )
+                expected = 0
+                for target in wanted:
+                    done, _state, declared = self._target_progress(
+                        target["topic_id"], target["tag_id"])
+                    if declared:
+                        expected += max(int(declared) - int(done), 0)
+                self.expected_questions = expected
+                self.harvester.expected_total = expected
                 for index, target in enumerate(wanted):
                     if self.harvester._interrupted:
                         status = "interrupted"
@@ -1053,6 +1064,14 @@ class ScraperTaskController:
         login could not continue the download it was made for.
         """
         pending = self._stored_pending()
+        live = (self.harvester.stats() if self.harvester is not None
+                else {"requests_per_minute": 0, "delay_low": 0,
+                      "delay_high": 0, "throttles_429_today": 0,
+                      "questions_per_hour": 0, "eta_seconds": None,
+                      "cooldown_seconds": 0, "expected_total":
+                      self.expected_questions})
+        if live.get("expected_total", 0) <= 0:
+            live["expected_total"] = self.expected_questions
         return {
             "is_running": self.is_running,
             "status": self.status,
@@ -1062,6 +1081,7 @@ class ScraperTaskController:
             "scraped_count": self.scraped_count,
             "logs": self.logs[-25:],
             "logs_seq": self.log_seq,
+            "stats": live,
             "login_in_progress": self.login_in_progress,
             "usage": self._usage_status(pending),
             "can_resume": bool(pending) and not self.is_running,

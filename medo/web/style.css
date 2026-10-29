@@ -1246,6 +1246,14 @@ body.theme-dark .notice-warning {
   color: var(--text-muted);
 }
 
+.scrape-stats,
+.dl-dock-stats {
+  font-size: 0.76rem;
+  line-height: 1.8;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .scrape-log-terminal {
   background: var(--bg-card-hover);
   border: 1px solid var(--border-color);

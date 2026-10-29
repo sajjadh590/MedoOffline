@@ -136,6 +136,13 @@ def scrape(
     )
     if result.get("detail"):
         console.print(f"    {result['detail']}")
+    live = harvester.stats()
+    console.print(
+        f"    live stats: {live['requests_per_minute']} request(s)/min, "
+        f"delay {live['delay_low']:.1f}-{live['delay_high']:.1f}s, "
+        f"429 today {live['throttles_429_today']}, "
+        f"{live['questions_per_hour']} question(s)/hour, "
+        f"learned ceiling {live['learned_ceiling']:.1f}s")
 
 
 @app.command()
