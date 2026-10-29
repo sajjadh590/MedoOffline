@@ -759,8 +759,8 @@ class ScraperTaskController:
                 res = audit_answers(db_path, on_log=self._push,
                                     should_stop=lambda: self.cancel_requested)
                 self.scraped_count = int(res["found"])
-                if res.get("status") == "limit":
-                    self.status = "limit"
+                if res.get("status") in ("limit", "daily_limit"):
+                    self.status = res["status"]
                 else:
                     self.status = ("interrupted" if self.cancel_requested
                                    else "completed")

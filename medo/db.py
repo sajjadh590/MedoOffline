@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Generator, Optional
 
@@ -290,6 +290,21 @@ def init_db(conn: sqlite3.Connection) -> None:
             cur.execute(
                 "ALTER TABLE questions ADD COLUMN fetched_as TEXT NOT NULL "
                 "DEFAULT 'unknown';"
+            )
+        # Why a repair pass could not finish this row, and when it may be
+        # tried again.  A locked/empty/throttled page must not count as
+        # repaired: the row keeps its reason and stays in the queue until a
+        # clean pass clears both columns (answer_audit._save).
+        if "repair_reason" not in cols:
+            cur.execute("ALTER TABLE questions ADD COLUMN repair_reason TEXT;")
+        if "repair_retry_after" not in cols:
+            cur.execute(
+                "ALTER TABLE questions ADD COLUMN repair_retry_after TEXT;"
+            )
+        if "repair_attempts" not in cols:
+            cur.execute(
+                "ALTER TABLE questions ADD COLUMN repair_attempts INTEGER "
+                "DEFAULT 0;"
             )
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_questions_site_id "
@@ -636,13 +651,71 @@ def count_untagged_questions(conn: sqlite3.Connection) -> int:
 
 
 # A question still needs the signed-in session when the key is missing, the
-# lesson is absent/partial/locked, or the page was stored as a guest.
+# lesson is absent/partial/locked, or the page was stored as a guest.  A row
+# with a stored repair reason is queued even when its fields look complete:
+# the reason is the promise that a later pass must retry it.
 NEEDS_REPAIR_SQL = (
-    "fetched_as <> 'login'"
+    "repair_reason IS NOT NULL"
+    " OR fetched_as <> 'login'"
     " OR correct_index IS NULL"
     " OR explanation_text IS NULL"
     " OR explanation_status IN ('locked', 'key_only', 'unknown')"
 )
+
+REPAIR_REASON_LABELS = {
+    "locked": "درس‌نامه قفل است",
+    "unknown": "سایت درس‌نامه را نشان نداد",
+    "empty_explanation": "صفحه درس‌نامهٔ خالی داد",
+    "shorter_explanation": "درس‌نامهٔ تازه کوتاه‌تر/نویزی بود",
+    "key_only": "فقط کلید آمد، درس‌نامه ناقص است",
+    "no_answer": "سایت پاسخ را نشان نداد",
+    "not_found": "سوال در صفحه پیدا نشد",
+    "rate_limited": "سایت درخواست را محدود کرد (۴۲۹)",
+    "quota": "سقف/پیام اشتراک سایت",
+    "daily_limit": "سقف روزانهٔ سایت",
+}
+
+
+def repair_retry_after(reason: str, now: Optional[datetime] = None) -> str:
+    """When a row with `reason` may be tried again (UTC ISO timestamp)."""
+    base = now or datetime.now(timezone.utc)
+    hours = {
+        "rate_limited": 0.5,
+        "quota": 6.0,
+        "daily_limit": 24.0,
+        "locked": 6.0,
+        "unknown": 6.0,
+        "empty_explanation": 6.0,
+        "shorter_explanation": 6.0,
+        "key_only": 6.0,
+        "no_answer": 6.0,
+        "not_found": 6.0,
+    }.get(reason, 6.0)
+    return (base + timedelta(hours=hours)).replace(microsecond=0).isoformat()
+
+
+def mark_repair_waiting(
+    conn: sqlite3.Connection, question_id: int, reason: str,
+    retry_after: Optional[str] = None,
+) -> None:
+    """Keep a row queued with a visible reason instead of marking it repaired."""
+    conn.execute(
+        "UPDATE questions SET repair_reason = ?, repair_retry_after = ?, "
+        "repair_attempts = coalesce(repair_attempts, 0) + 1, "
+        "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (str(reason), retry_after or repair_retry_after(reason), int(question_id)),
+    )
+    conn.commit()
+
+
+def clear_repair_waiting(conn: sqlite3.Connection, question_id: int) -> None:
+    """A clean pass finished the row: it leaves the queue."""
+    conn.execute(
+        "UPDATE questions SET repair_reason = NULL, "
+        "repair_retry_after = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (int(question_id),),
+    )
+    conn.commit()
 
 
 def count_needing_repair(conn: sqlite3.Connection) -> int:
@@ -655,18 +728,55 @@ def count_needing_repair(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def count_repair_waiting(conn: sqlite3.Connection) -> int:
+    """Queued rows that are not due yet (reason + a future retry time)."""
+    try:
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        return int(conn.execute(
+            f"SELECT count(*) FROM questions WHERE ({NEEDS_REPAIR_SQL}) "
+            "AND repair_retry_after IS NOT NULL AND repair_retry_after > ?",
+            (now,),
+        ).fetchone()[0] or 0)
+    except sqlite3.OperationalError:
+        return 0
+
+
+def repair_reason_counts(conn: sqlite3.Connection) -> list[dict]:
+    """Queue grouped by stored reason (plus unclassified legacy rows)."""
+    try:
+        rows = conn.execute(
+            "SELECT coalesce(nullif(repair_reason, ''), 'unclassified') AS reason, "
+            "       count(*) AS n "
+            f"FROM questions WHERE {NEEDS_REPAIR_SQL} GROUP BY reason "
+            "ORDER BY n DESC"
+        ).fetchall()
+        return [{"reason": row["reason"], "count": int(row["n"])} for row in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
 def questions_needing_repair(
     conn: sqlite3.Connection, limit: Optional[int] = None,
+    *, due_only: bool = False, now: Optional[str] = None,
 ) -> list[dict]:
-    """The repair queue, oldest first, with what it takes to re-locate a page."""
+    """The repair queue, oldest first, with what it takes to re-locate a page.
+
+    ``due_only`` hides rows whose stored retry time has not arrived; the row
+    is still in the queue (and counted), it simply may not be requested yet.
+    """
     sql = (
         "SELECT id, topic_id, tag_id, site_question_id, source_page, ordinal, "
         "       stem_html, stem_text, options_json, correct_index, "
         "       explanation_html, explanation_text, explanation_status, "
-        "       fetched_as "
-        f"FROM questions WHERE {NEEDS_REPAIR_SQL} ORDER BY id"
+        "       fetched_as, repair_reason, repair_retry_after, repair_attempts "
+        f"FROM questions WHERE ({NEEDS_REPAIR_SQL})"
     )
     args: list = []
+    if due_only:
+        sql += (" AND (repair_retry_after IS NULL OR repair_retry_after <= ?)")
+        args.append(now or datetime.now(timezone.utc).replace(
+            microsecond=0).isoformat())
+    sql += " ORDER BY id"
     if limit:
         sql += " LIMIT ?"
         args.append(int(limit))

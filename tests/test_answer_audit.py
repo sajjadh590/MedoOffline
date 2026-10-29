@@ -165,14 +165,15 @@ def _fake_page(text, status, correct=3, stem="سوال", options=None):
     )
 
 
-def _stored_full(conn, text="درس‌نامهٔ کامل و بلند " * 20, site_id=1473):
+def _stored_full(conn, text="درس‌نامهٔ کامل و بلند " * 20, site_id=1473,
+                 fetched_as="login"):
     """Store one question the way a good Pro pass leaves it."""
     q = _question("سوال با درس‌نامه", 2)
     q.site_question_id = site_id
     q.explanation_text = text
     q.explanation_html = f"<div>{text}</div>"
     q.explanation_status = ExplanationStatus.FULL
-    qid = upsert_question(conn, q, topic_id=83, fetched_as="login")
+    qid = upsert_question(conn, q, topic_id=83, fetched_as=fetched_as)
     row = dict(conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone())
     return qid, row, text
 
@@ -278,3 +279,218 @@ def test_backup_is_one_copy_per_process_and_prunes_the_oldest(tmp_path):
     assert "medo-20260101-0100.db" not in names
     assert len(names) == 5
     backup.reset_backup_guard()
+
+
+# ---------------------------------------------------------------------------
+# A1: a failed page keeps its row queued, with a reason and a retry time
+# ---------------------------------------------------------------------------
+
+def _queue_row(conn, qid):
+    return dict(conn.execute(
+        "SELECT repair_reason, repair_retry_after, repair_attempts, "
+        "explanation_text, explanation_status, fetched_as "
+        "FROM questions WHERE id = ?", (qid,)).fetchone())
+
+
+def _assert_still_queued(tmp_path, qid, reason):
+    from datetime import datetime, timezone
+
+    from medo.answer_audit import repair_queue
+
+    conn = get_connection(tmp_path / "medo.db")
+    queued = {row["id"] for row in repair_queue(conn)}
+    row = _queue_row(conn, qid)
+    assert qid in queued
+    assert row["repair_reason"] == reason
+    assert datetime.fromisoformat(row["repair_retry_after"]) > datetime.now(timezone.utc)
+    assert row["repair_attempts"] >= 1
+    conn.close()
+    return row
+
+
+def test_locked_and_empty_pages_keep_the_row_queued(tmp_path):
+    from medo import answer_audit
+
+    for name, text, status, reason in (
+        ("locked", None, ExplanationStatus.LOCKED, "locked"),
+        ("unknown", None, ExplanationStatus.UNKNOWN, "unknown"),
+        ("empty", "", ExplanationStatus.FULL, "empty_explanation"),
+    ):
+        conn = get_connection(tmp_path / f"{name}.db")
+        init_db(conn)
+        qid, row, stored = _stored_full(conn, fetched_as="guest")
+        info = answer_audit._save(conn, row, _fake_page(text, status))
+        assert info["explanation_kept"] is True
+        assert info["waiting_reason"] == reason
+        conn.close()
+
+        # Point the helper at this database by asking the same connection's
+        # path; the row must be in that file's queue, not a neighbour's.
+        conn = get_connection(tmp_path / f"{name}.db")
+        queued = {r["id"] for r in answer_audit.repair_queue(conn)}
+        saved = _queue_row(conn, qid)
+        assert qid in queued
+        assert saved["repair_reason"] == reason
+        assert saved["explanation_text"] == stored
+        assert saved["fetched_as"] == "guest"
+        conn.close()
+
+
+def test_key_only_page_is_stored_but_stays_queued(tmp_path):
+    from medo import answer_audit
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    qid = upsert_question(conn, _question("سوال بدون درس", 2), topic_id=83,
+                          fetched_as="guest")
+    row = dict(conn.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone())
+    info = answer_audit._save(conn, row, _fake_page("تایید گزینه ۳",
+                                                   ExplanationStatus.KEY_ONLY))
+    saved = _queue_row(conn, qid)
+    assert info["waiting_reason"] == "key_only"
+    assert saved["repair_reason"] == "key_only"
+    assert saved["explanation_text"] == "تایید گزینه ۳"
+    conn.close()
+    _assert_still_queued(tmp_path, qid, "key_only")
+
+
+def test_limit_reason_distinguishes_daily_quota_and_429():
+    from medo.answer_audit import limit_reason
+
+    assert limit_reason("درخواست‌های مجاز امروز شما به عنوان کاربر میهمان "
+                        "به پایان رسیده است") == "daily_limit"
+    assert limit_reason("برای ادامه، اشتراک ویژه تهیه کنید") == "quota"
+    assert limit_reason("", 429) == "rate_limited"
+    assert limit_reason("سوال معمولی") is None
+
+
+def test_daily_limit_stops_the_pass_and_marks_the_row(tmp_path, monkeypatch):
+    """A fake page proves the whole job stops cleanly and records the reason."""
+    from medo import answer_audit
+    from medo import backup
+    from medo import browser as browser_mod
+    from medo import parser as parser_mod
+    from medo import scraper as scraper_mod
+
+    db = tmp_path / "medo.db"
+    conn = get_connection(db)
+    init_db(conn)
+    qid, row, stored = _stored_full(conn, fetched_as="guest")
+    conn.close()
+
+    class FakeLocator:
+        def inner_text(self, timeout=0):
+            return "سقف روزانهٔ شما پر شده است؛ فردا دوباره تلاش کنید."
+
+    class FakePage:
+        url = "https://medofast.ir/qbank/topic-id-83?page=4"
+
+        def goto(self, *a, **k):
+            return None
+
+        def wait_for_selector(self, *a, **k):
+            return None
+
+        def content(self):
+            return "<html><body>fake</body></html>"
+
+        def locator(self, selector):
+            return FakeLocator()
+
+    class FakeContext:
+        def new_page(self):
+            return FakePage()
+
+        def close(self):
+            return None
+
+    class FakeBrowser:
+        def close(self):
+            return None
+
+    class FakePlaywright:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(answer_audit, "sync_playwright", lambda: FakePlaywright())
+    monkeypatch.setattr(answer_audit, "has_storage_state", lambda *a, **k: True)
+    monkeypatch.setattr(browser_mod, "launch_browser", lambda *a, **k: FakeBrowser())
+    monkeypatch.setattr(browser_mod, "new_context", lambda *a, **k: FakeContext())
+    monkeypatch.setattr(
+        parser_mod, "parse_question_html",
+        lambda *a, **k: _fake_page(None, ExplanationStatus.UNKNOWN,
+                                   options=("گزینه 1", "گزینه 2",
+                                            "گزینه 3", "گزینه 4")))
+    monkeypatch.setattr(scraper_mod, "document_status", lambda page: 200)
+    monkeypatch.setattr(scraper_mod.Harvester, "_submit_for_answer",
+                        staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(scraper_mod.Harvester, "_store_assets",
+                        lambda self, conn, parsed: None)
+    monkeypatch.setattr(backup, "backup_database", lambda *a, **k: None)
+
+    result = answer_audit.audit_answers(db, on_log=lambda m: None)
+    assert result["status"] == "daily_limit"
+    assert result["limit_reason"] == "daily_limit"
+    conn = get_connection(db)
+    saved = _queue_row(conn, qid)
+    assert saved["repair_reason"] == "daily_limit"
+    assert saved["explanation_text"] == stored
+    assert qid in {r["id"] for r in answer_audit.repair_queue(conn)}
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# A2: normalized keep-rule (watermark, decoys, invisibles)
+# ---------------------------------------------------------------------------
+
+def test_normalize_lesson_strips_watermark_and_decoys():
+    from medo.answer_audit import normalize_lesson
+
+    decoy = "این پاراگراف از مبحث دیگری است و باید حذف شود"
+    raw = "درس اصلی\ufe0f با نیم‌فاصله MedoFast.ir" + " " + decoy
+    clean = normalize_lesson(raw, None, (decoy,))
+    assert "MedoFast" not in clean and "مدو" not in clean
+    assert "\ufe0f" not in clean
+    assert decoy not in clean
+    assert clean.startswith("درس اصلی")
+    assert "نیم‌فاصله" in clean
+
+
+def test_clean_full_lesson_wins_over_a_dirty_old_one(tmp_path):
+    """Old decoys/watermark must not block a shorter clean FULL lesson."""
+    from medo import answer_audit
+    from medo.db import get_question_by_id
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    decoy = "متن جعلی از مبحث دیگر که در نسخهٔ قدیمی ذخیره شده بود"
+    dirty = "جملهٔ اصلی درس " * 20 + " MedoFast.ir " + decoy
+    qid, row, _ = _stored_full(conn, text=dirty, fetched_as="login")
+    clean = "جملهٔ اصلی درس " * 12
+    page = _fake_page(clean, ExplanationStatus.FULL)
+    page.decoy_texts = [decoy]
+    info = answer_audit._save(conn, row, page)
+    saved = get_question_by_id(conn, qid)
+    assert info["explanation_kept"] is False
+    assert saved["explanation_text"] == clean
+    assert saved["repair_reason"] is None
+    conn.close()
+
+
+def test_shorter_clean_page_keeps_the_stored_full_lesson(tmp_path):
+    from medo import answer_audit
+    from medo.db import get_question_by_id
+
+    conn = get_connection(tmp_path / "medo.db")
+    init_db(conn)
+    qid, row, stored = _stored_full(conn)
+    page = _fake_page("خیلی کوتاه", ExplanationStatus.FULL)
+    info = answer_audit._save(conn, row, page)
+    saved = get_question_by_id(conn, qid)
+    assert info["explanation_kept"] is True
+    assert saved["explanation_text"] == stored
+    assert saved["repair_reason"] == "shorter_explanation"
+    conn.close()

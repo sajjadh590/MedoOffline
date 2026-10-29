@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from typing import Callable, Optional
 
 # This Playwright build exports the error as ``Error``; importing the legacy
@@ -30,7 +31,162 @@ from playwright.sync_api import Error as PlaywrightError, sync_playwright
 
 from medo import applog
 from medo.auth import DEFAULT_STORAGE_STATE, has_storage_state
-from medo.db import DEFAULT_DB_PATH, get_connection, questions_needing_repair
+from medo.db import (DEFAULT_DB_PATH, clear_repair_waiting, get_connection,
+                     mark_repair_waiting, questions_needing_repair)
+
+# A page can end the whole pass: a 429, a generic plan/quota wall, or the
+# daily allowance notice.  They are different: the first two may clear in
+# minutes/hours, the daily one only tomorrow.  Classified from the body, so a
+# fake page in the tests exercises exactly the same rule as a live one.
+DAILY_LIMIT_PHRASES = (
+    "محدودیت روزانه",
+    "سقف روزانه",
+    "کاربر میهمان به پایان رسیده",
+    "درخواست های مجاز امروز",
+    "درخواستهای مجاز امروز",
+    "سهمیهٔ امروز",
+    "سهمیه امروز",
+)
+
+
+def limit_reason(body: str, http_status: Optional[int] = None) -> Optional[str]:
+    """'rate_limited' / 'daily_limit' / 'quota', or None when the page is fine."""
+    if http_status == 429:
+        return "rate_limited"
+    text = str(body or "")
+    if any(phrase in text for phrase in DAILY_LIMIT_PHRASES):
+        return "daily_limit"
+    from medo.scraper import LIMIT_PHRASES
+
+    if any(phrase in text for phrase in LIMIT_PHRASES):
+        return "quota"
+    return None
+
+
+_WATERMARK_RE = re.compile(
+    r"(?:medofast(?:\.ir)?|مدوفست(?:\.ir)?|مدو\s*فست)\s*$", re.IGNORECASE)
+_ARABIC_LETTERS = str.maketrans({"\u0643": "\u06a9", "\u064a": "\u06cc",
+                                 "\u0649": "\u06cc"})
+
+
+def _strip_decoy_html(html: str) -> str:
+    """Remove hidden .element-container blocks from stored/legacy lesson HTML.
+
+    Older rows were sanitized, which drops ``data-element-id``; this still
+    helps on rows captured before the sanitizer learned to prune decoys, and
+    is harmless when there is nothing to remove.
+    """
+    if not html or "element-container" not in html:
+        return html or ""
+    from medo import parser as P
+
+    dom = P._MiniDom()
+    dom.feed(html)
+    block = dom.find_by_id("block-b")
+    if block is None:
+        return html
+    rules = P._collect_css_rules(html)
+    infos = {id(node): P._block_info(node, rules, block)
+             for node in P._containers(block)}
+
+    def prune(node):
+        if node.get("tag") == "#text":
+            return node
+        info = infos.get(id(node))
+        if info and (info["uuid_style"] or info["marked_hidden"]):
+            return None
+        return {"tag": node.get("tag", "div"),
+                "attrs": node.get("attrs", {}),
+                "children": [c for c in (prune(k) for k in node.get("children", []))
+                             if c is not None]}
+
+    try:
+        return dom.inner_html(prune(block))
+    except Exception:
+        return html
+
+
+def normalize_lesson(text, html: Optional[str] = None,
+                     decoys: tuple[str, ...] = ()) -> str:
+    """Canonical lesson text for a fair length/dirtiness comparison.
+
+    Removes variation selectors and other invisible code points, NFKC-normalises,
+    maps Arabic glyphs to Persian, drops the trailing «MedoFast.ir» watermark,
+    removes known decoy paragraphs and collapses whitespace.  ZWNJ-only
+    differences therefore cannot make a clean lesson look shorter.
+    """
+    raw = str(text or "")
+    if html:
+        from medo.html_utils import html_to_text
+
+        stripped = _strip_decoy_html(html)
+        if stripped:
+            raw = html_to_text(stripped) or raw
+    raw = unicodedata.normalize("NFKC", raw)
+    from medo.text_utils import strip_invisible
+
+    raw = strip_invisible(raw, keep_zwnj=True).translate(_ARABIC_LETTERS)
+    raw = re.sub(r"[^\S\n]+", " ", raw)
+    for decoy in decoys:
+        clean_decoy = re.sub(r"\s+", " ", str(decoy or "")).strip()
+        if len(clean_decoy) >= 8 and clean_decoy in raw:
+            raw = raw.replace(clean_decoy, " ")
+    previous = None
+    while previous != raw:            # a row can end with two stamps
+        previous = raw
+        raw = _WATERMARK_RE.sub("", raw.rstrip())
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _lesson_decision(row: dict, parsed) -> dict:
+    """Whether the page's lesson may replace the stored one, and why not.
+
+    A stored FULL lesson is never replaced by an empty, locked, unknown or
+    drastically shorter one.  A clean FULL page wins over an old lesson that
+    still carries decoys/watermarks, even when it is somewhat shorter.
+    """
+    old_status = str(row.get("explanation_status") or "")
+    old_text = row.get("explanation_text") or ""
+    old_html = row.get("explanation_html") or ""
+    new_status = _status_value(parsed)
+    new_text = getattr(parsed, "explanation_text", None) or ""
+    new_html = getattr(parsed, "explanation_html", None) or ""
+    decoys = tuple(getattr(parsed, "decoy_texts", ()) or ())
+
+    old_clean = normalize_lesson(old_text, old_html, decoys)
+    old_dirty = normalize_lesson(old_text, old_html, ())
+    new_clean = normalize_lesson(new_text, new_html)
+    dirty = bool(old_clean) and old_clean != old_dirty
+
+    decision = {
+        "keep": False, "reason": None,
+        "old_len": len(old_clean), "new_len": len(new_clean),
+        "dirty_old": dirty,
+    }
+    if old_status == "full" and old_clean:
+        if new_status in ("unknown", "locked") or not new_clean:
+            decision.update(keep=True,
+                            reason="locked" if new_status == "locked"
+                            else "unknown" if new_status == "unknown"
+                            else "empty_explanation")
+            return decision
+        # The 40% rule is measured on normalized text (invisibles, watermark,
+        # decoys and spacing removed), not on the raw stored string.
+        if not dirty and len(new_clean) < 0.4 * len(old_clean):
+            decision.update(keep=True, reason="shorter_explanation")
+            return decision
+        return decision
+
+    # No usable stored FULL lesson: an empty/locked page changes nothing, but
+    # a short (key-only) page may be stored and keeps the row queued.
+    if new_status in ("unknown", "locked") or not new_clean:
+        decision.update(keep=True,
+                        reason="locked" if new_status == "locked"
+                        else "unknown" if new_status == "unknown"
+                        else "empty_explanation")
+    elif new_status != "full":
+        decision["reason"] = "key_only"
+    return decision
 
 
 class Stopped(RuntimeError):
@@ -83,13 +239,17 @@ def missing_questions(conn, topic_id: Optional[int] = None,
 
 
 def repair_queue(conn, topic_id: Optional[int] = None,
-                 limit: Optional[int] = None) -> list[dict]:
+                 limit: Optional[int] = None,
+                 due_only: bool = False) -> list[dict]:
     """Every question the signed-in session could still improve.
 
     Same rows the scraper's ``NEEDS_REPAIR_SQL`` counts: no key, no or partial
-    lesson, or a page that was read as a guest.
+    lesson, a page read as a guest, or a row whose last attempt stored a retry
+    reason.  ``due_only`` hides rows whose stored retry time is still in the
+    future (the pass must not hammer a locked page); they remain in the queue.
     """
-    rows = [_with_signature(row) for row in questions_needing_repair(conn)]
+    rows = [_with_signature(row)
+            for row in questions_needing_repair(conn, due_only=due_only)]
     if topic_id:
         rows = [row for row in rows if int(row.get("topic_id") or 0) == int(topic_id)]
     rows = [row for row in rows if row.get("signature") or row.get("site_question_id")]
@@ -116,15 +276,27 @@ def audit_answers(
     """Re-read every question of the repair queue and keep what the site shows."""
     conn = get_connection(db_path)
     try:
-        rows = repair_queue(conn, topic_id=topic_id, limit=limit)
+        rows = repair_queue(conn, topic_id=topic_id, limit=limit, due_only=True)
     finally:
         conn.close()
 
     result = {"checked": 0, "found": 0, "still_missing": 0,
               "skipped": 0, "locked": 0, "kept_old": 0,
-              "texts_updated": 0, "status": "completed"}
+              "texts_updated": 0, "status": "completed",
+              "limit_reason": None}
     if not rows:
-        on_log("همهٔ سوال‌های بانک کامل‌اند؛ چیزی برای ترمیم نمانده است.")
+        from medo.db import count_repair_waiting
+
+        conn = get_connection(db_path)
+        try:
+            waiting = count_repair_waiting(conn)
+        finally:
+            conn.close()
+        if waiting:
+            on_log(f"{waiting} سوال در صف است ولی زمان تلاش بعدی‌شان "
+                   "نرسیده (سایت قفل/محدود کرده بود)؛ کمی بعد دوباره بزن.")
+        else:
+            on_log("همهٔ سوال‌های بانک کامل‌اند؛ چیزی برای ترمیم نمانده است.")
         return result
     if require_login and not has_storage_state():
         on_log("برای ترمیم پاسخ و درس‌نامه باید وارد حساب شوی: «ورود با مرورگر» "
@@ -145,7 +317,7 @@ def audit_answers(
 
     from medo.browser import launch_browser, new_context
     from medo.parser import parse_question_html
-    from medo.scraper import LIMIT_PHRASES, Harvester, document_status
+    from medo.scraper import Harvester, document_status
 
     # Images (the mind-map) are fetched and rewritten exactly like a scrape
     # does it, so a repaired lesson renders offline like any other.
@@ -217,7 +389,10 @@ def audit_answers(
 
                 if matched is None:
                     result["skipped"] += 1
-                    on_log(f"{label}: در صفحه پیدا نشد — رد شد (بعداً دوباره امتحان کنید).")
+                    if not dry_run:
+                        _mark_waiting(db_path, row["id"], "not_found")
+                    on_log(f"{label}: در صفحه پیدا نشد — در صف ماند "
+                           "(بعداً دوباره امتحان می‌شود).")
                     continue
 
                 # The site reveals the key after an option is picked and
@@ -242,10 +417,15 @@ def audit_answers(
                     on_log(f"{label}: درس‌نامه ذخیره شد ولی سایت پاسخی نشان نداد.")
                 else:
                     result["still_missing"] += 1
-                    result["locked"] += int(
+                    locked = bool(
                         submitted is not None
                         and str(getattr(submitted.explanation_status, "value", "")) == "locked")
-                    on_log(f"{label}: سایت پاسخی نشان نداد (احتمالاً فقط با اشتراک پرو).")
+                    result["locked"] += int(locked)
+                    if not dry_run:
+                        _mark_waiting(db_path, row["id"],
+                                      "locked" if locked else "no_answer")
+                    on_log(f"{label}: سایت پاسخی نشان نداد (احتمالاً فقط با "
+                           "اشتراک پرو) — در صف ماند.")
 
                 # A plan/quota wall is not a per-question failure: stop and say
                 # how much of the queue is left, so the user resumes later.
@@ -253,10 +433,24 @@ def audit_answers(
                     body = page.locator("body").inner_text(timeout=8000)
                 except PlaywrightError:
                     body = ""
-                if any(ph in body for ph in LIMIT_PHRASES) or document_status(page) == 429:
-                    result["status"] = "limit"
-                    on_log("سایت سقف/محدودیت امروز را اعلام کرد — ترمیم متوقف شد؛ "
-                           "هر چه تا اینجا ذخیره شد مانده است. فردا دوباره بزن.")
+                stop_reason = limit_reason(body, document_status(page))
+                if stop_reason:
+                    result["status"] = ("daily_limit" if stop_reason == "daily_limit"
+                                        else "limit")
+                    result["limit_reason"] = stop_reason
+                    if not dry_run:
+                        _mark_waiting(db_path, row["id"], stop_reason)
+                    if stop_reason == "daily_limit":
+                        on_log("سایت سقف روزانه را اعلام کرد — ترمیم کامل و تمیز "
+                               "متوقف شد؛ دلیل در صف ثبت شد و فردا از همین‌جا "
+                               "ادامه می‌دهد.")
+                    elif stop_reason == "rate_limited":
+                        on_log("سایت درخواست را محدود کرد (HTTP 429) — ترمیم "
+                               "متوقف شد؛ ۱۵ تا ۳۰ دقیقه صبر کن و دوباره بزن. "
+                               "هر چه ذخیره شد مانده است.")
+                    else:
+                        on_log("سایت پیام سقف/اشتراک نشان داد — ترمیم متوقف شد؛ "
+                               "هر چه تا اینجا ذخیره شد مانده است.")
                     break
                 time.sleep(max(0.0, delay))
         finally:
@@ -268,7 +462,19 @@ def audit_answers(
                "(سایت نسخهٔ خالی/قفل برگردانده بود).")
     if result["texts_updated"]:
         on_log(f"{result['texts_updated']} متن سؤال/گزینه از صفحهٔ زنده به‌روز شد.")
+    if result.get("limit_reason"):
+        on_log(f"دلیل توقف: {result['limit_reason']} — ردیف‌های ناتمام با زمان "
+               "تلاش بعدی در صف ذخیره شدند.")
     return result
+
+
+def _mark_waiting(db_path, question_id: int, reason: str) -> None:
+    """Persist a retry reason without touching the recovered fields."""
+    conn = get_connection(db_path)
+    try:
+        mark_repair_waiting(conn, question_id, reason)
+    finally:
+        conn.close()
 
 
 def _persist(db_path, row: dict, parsed, store_assets, refresh_text: bool,
@@ -295,20 +501,8 @@ def _status_value(parsed) -> str:
 
 
 def _keep_old_explanation(row: dict, parsed) -> bool:
-    """True when the page would erase a stored FULL lesson."""
-    if str(row.get("explanation_status") or "") != "full":
-        return False
-    old_text = str(row.get("explanation_text") or "")
-    if not old_text:
-        return False
-    new_text = str(parsed.explanation_text or "")
-    if _status_value(parsed) in ("unknown", "locked"):
-        return True
-    if not new_text:
-        return True
-    # A page that answers with a stub (typically «برای دیدن پاسخ وارد شوید»)
-    # must not overwrite a long lesson with a few words.
-    return len(new_text) < 0.4 * len(old_text)
+    """True when the page would erase a stored FULL lesson (compatibility)."""
+    return bool(_lesson_decision(row, parsed)["keep"])
 
 
 def _options_text_changed(row: dict, parsed) -> bool:
@@ -327,7 +521,9 @@ def _save(conn, row: dict, parsed, store_assets=None,
 
     A stored FULL lesson is never replaced by an empty, much shorter, locked or
     unknown one: a repair may add what is missing, not destroy what the account
-    already paid for.
+    already paid for.  When the page cannot finish the row, the reason and a
+    retry time are stored and the row stays queued; it is never marked
+    repaired by a locked/empty/quota page.
     """
     if store_assets is not None:
         try:
@@ -336,17 +532,28 @@ def _save(conn, row: dict, parsed, store_assets=None,
             # A missing mind-map must not throw away the recovered lesson.
             applog.log(f"[audit] assets for question {row['id']} failed: {ex}")
 
-    keep_old = _keep_old_explanation(row, parsed)
+    decision = _lesson_decision(row, parsed)
+    keep_old = decision["keep"]
+    reason = decision["reason"]
     if keep_old:
         explanation_html = row.get("explanation_html")
         explanation_text = row.get("explanation_text")
         explanation_status = row.get("explanation_status")
-        applog.log(f"[audit] kept old explanation: question {row['id']} "
-                   f"(site returned {_status_value(parsed)})")
+        applog.log(
+            f"[audit] kept old explanation: question {row['id']} "
+            f"(site returned {_status_value(parsed)}, reason {reason}, "
+            f"normalized old={decision['old_len']} new={decision['new_len']}"
+            + (", old had decoys/watermark" if decision["dirty_old"] else "")
+            + ")")
     else:
         explanation_html = parsed.explanation_html or row.get("explanation_html")
         explanation_text = parsed.explanation_text or row.get("explanation_text")
         explanation_status = _status_value(parsed)
+        if decision["old_len"] or decision["new_len"]:
+            applog.log(
+                f"[audit] stored explanation: question {row['id']} "
+                f"normalized old={decision['old_len']} new={decision['new_len']}"
+                + (", old had decoys/watermark" if decision["dirty_old"] else ""))
 
     votes = parsed.vote_percent_json() if any(
         v is not None for v in (parsed.vote_percent or [])) else None
@@ -359,7 +566,8 @@ def _save(conn, row: dict, parsed, store_assets=None,
         "explanation_status = ?",
         "vote_percent_json = coalesce(?, vote_percent_json)",
         "has_images = max(has_images, ?)",
-        "fetched_as = 'login'",
+        # A kept/short page must not promote the row to a finished login row.
+        "fetched_as = ?",
         "updated_at = CURRENT_TIMESTAMP",
     ]
     params = [
@@ -370,6 +578,7 @@ def _save(conn, row: dict, parsed, store_assets=None,
         explanation_status,
         votes,
         int(bool(parsed.images and explanation_html)),
+        (row.get("fetched_as") or "guest") if keep_old else "login",
     ]
 
     text_updated = False
@@ -393,4 +602,10 @@ def _save(conn, row: dict, parsed, store_assets=None,
     conn.execute("UPDATE questions SET " + ", ".join(sets) + " WHERE id = ?",
                  params)
     conn.commit()
-    return {"explanation_kept": keep_old, "text_updated": text_updated}
+    if reason:
+        mark_repair_waiting(conn, row["id"], reason)
+    else:
+        clear_repair_waiting(conn, row["id"])
+    return {"explanation_kept": keep_old, "text_updated": text_updated,
+            "waiting_reason": reason,
+            "old_len": decision["old_len"], "new_len": decision["new_len"]}

@@ -71,6 +71,9 @@ class ParsedQuestion:
     explanation_html: Optional[str] = None
     explanation_text: Optional[str] = None
     explanation_status: ExplanationStatus = ExplanationStatus.UNKNOWN
+    # Texts of the hidden decoy blocks the page shipped, so a repair can tell
+    # whether a legacy stored lesson still contains them.  Never persisted.
+    decoy_texts: list[str] = field(default_factory=list)
 
     # --- Images ---
     images: list[ParsedImage] = field(default_factory=list)

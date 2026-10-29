@@ -921,6 +921,12 @@ def parse_question_html(
     # 3. Explanation  (#block-b .qtext-after)
     # ------------------------------------------------------------------
     block_b = dom.find_by_id("block-b")
+    decoy_texts: list[str] = []
+    if block_b:
+        for info in (_block_info(node, css_rules, block_b)
+                     for node in _containers(block_b)):
+            if info["uuid_style"] and info["text"]:
+                decoy_texts.append(info["text"])
     expl_html_raw  = _explanation_html(dom, block_b, css_rules) if block_b else ""
     expl_html      = sanitize_html(expl_html_raw) if expl_html_raw else None
     expl_text      = _clean_text(html_to_text(expl_html_raw)) if expl_html_raw else None
@@ -1023,6 +1029,7 @@ def parse_question_html(
         explanation_html   = expl_html,
         explanation_text   = expl_text,
         explanation_status = explanation_status,
+        decoy_texts        = decoy_texts,
         images             = images,
         has_images         = bool(images),
     )
