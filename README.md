@@ -7,7 +7,9 @@ answer and the Pro lesson), then lets you study them **with no internet at all**
 * **Desktop** — a Python CLI plus a local web app at `127.0.0.1` (Persian RTL,
   light/dark theme, keyboard shortcuts).
 * **Android** — a dependency-free Java app (`dist/medo.apk`, ~280 KB) that reads
-  a transferred `.medo` bank and works fully offline.
+  a transferred `.medo` bank and works fully offline, with the same two tree
+  tabs as the desktop («بانک من» / «همهٔ دسته‌ها»), five reading themes and
+  four text sizes in a Settings screen.
 
 The archive lives in `data/medo.db` on this PC. GitHub holds **code only** — no
 scraped text, no session, no builds.
@@ -52,6 +54,7 @@ Every flag below comes from the command's own `--help`.
 | `diagnose-live` | One live probe: page counter, `?tag=` filtering | `--topic`, `--tag`, `--headless`, `--state` |
 | `live-report` | One pasteable status summary (counts only, no lesson text) | `--db`, `--log`, `--network/--no-network` |
 | `check-site-ids` | Fail loudly if the site stops exposing its question id | `--topic`, `--tag`, `--headless`, `--state` |
+| `organize` | Map stored questions to subtopics with live page progress and Stop | `--topic`, `--site-ids`, `--max-pages`, `--db` |
 | `import-fixtures` | Import synthetic/captured MHTML into a test DB | `--db` |
 | `keystore-backup` | Zip the Android signing key + its SHA-256 into `dist/` | `--keystore`, `--output` |
 
@@ -125,6 +128,16 @@ JSON document) still open.
 In the app: **دریافت بانک → از فایل** (or **دریافت از وای‌فای**). Over USB,
 `adb reverse tcp:8765 tcp:8765` makes the Wi-Fi address reachable at
 `127.0.0.1`.
+
+### تب‌ها، تم و اندازهٔ متن
+
+The home screen has the same two trees as the desktop: **«بانک من»** (only
+branches that hold a downloaded question) and **«همهٔ دسته‌ها»** (the full site
+tree); the choice is remembered. The gear opens **تنظیمات**: five palettes
+(تیره، مشکی AMOLED، روشن، کاغذی/سپیا، آبی-خاکستری) and four text sizes. Every
+screen, the correct/wrong highlight and the lesson use central tokens, so a
+change applies at once without restarting the app. A long lesson (wide table,
+500-character token) wraps and scrolls instead of being clipped.
 
 ---
 

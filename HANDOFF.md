@@ -1,179 +1,162 @@
-# Handoff report — MedoOffline, phases 0–6
+# Handoff report — MedoOffline, batch A1–B5 (safety fixes + owner requests)
 
-Date: 2026-10-28 · Branch: `master` · Working tree clean · Nothing pushed.
+Date: 2026-10-29 · Branch: `master` · Working tree clean after this commit.
 
-This is the short technical report for another agent. The long-form context
-(product, every past bug, dead ends) is in [`PROMPT.md`](PROMPT.md); the
-chronological evidence is in [`NOTES.md`](NOTES.md). Read those two before
-changing behaviour.
+Short technical report for another agent. Long-form context is in
+[`PROMPT.md`](PROMPT.md); the chronological log is [`docs/history.md`](docs/history.md);
+the current state page is [`NOTES.md`](NOTES.md) — read NOTES first.
 
 ---
 
 ## 1. What was asked
 
-Finish the remaining phases of the project plan (Phase 4 → 6) and leave a
-report. Phases 0–3 had already landed earlier (capture diagnostics, Pro lesson
-parsing, stable site ids + many-to-many nodes, subtopic positioning/backfill).
+Two parts: (A) fix what a review found in the previous round — repair-queue
+correctness, the lesson keep-rule, a git-history audit, more `live-report`
+detail — and (B) owner requests: an Android «بانک من» tab, an Android settings
+screen with five themes and four text sizes, faster-but-safe extraction, a
+huge-explanation layout fix (web + Android), and a real progress/Stop story for
+the subtopic organizer. Rules: one request at a time, never bypass quota or a
+limit, stop on 429/captcha/limit, no scraped or paid content in git, tests with
+every item, NOTES under 200 lines.
 
-## 2. Commits
+## 2. Commits (newest first)
 
 | Commit | Scope |
 | --- | --- |
-| `2844e1b` | Phase 4 — repair queue, doctor, adaptive pacing, job lock, PDF on demand |
-| `631cfdf` | Phase 5a — shared Persian search, light/paged API, FTS trigger, Android build, keystore backup |
-| `7b440af` | Phase 5b — `.medo` v2 (zip index + category chunks), phone word index, category/image selection |
-| `2ccda3e` | Phase 6 — clean-clone tests, housekeeping, README from `--help`, PROMPT/NOTES refresh |
-
-`git log --oneline -8` also shows the earlier phase commits (`37ca873`,
-`4403cbe`, `95d2be7`, `5540fe6`, …).
+| `e4873df` | B4 web — lesson layout + `make_long_lesson.py` / `check_long_lesson.py` |
+| `0e8c199` | B1 + B2 + B4-Android — bank tab, themes/settings, `LessonText` |
+| `2c82441` | B5 — organizer job record, progress, Stop, watchdog, CLI output |
+| `721a0af` | B3 — learned pace ceiling, cool-down, redundancy removal, live stats |
+| `0078d7a` | A4 — site-id gaps, repair reasons, recent 429 delays in `live-report` |
+| `200d6db` | A3 — `audit_push.py --history` over every reachable commit |
+| `d96b7b9` | A1 + A2 — repair queue reasons/retry-after, normalized keep-rule |
 
 ## 3. Changes, by area
 
-### 3.1 Repair only what the login can improve (Phase 4)
-- `questions.fetched_as` (`guest` / `login` / `unknown`) is written on every
-  upsert from the active session. Migration runs in `init_db`; existing rows
-  default to `unknown`, so every pre-fix row is treated as repair-worthy exactly
-  once.
-- `NEEDS_REPAIR_SQL`, `count_needing_repair`, `questions_needing_repair` in
-  `medo/db.py`.
-- `medo/answer_audit.py` is now one resumable job: queue by id, locate a page by
-  `site_question_id` or unique option signature, submit «نمایش جواب» with the
-  same `Harvester` path, store answer/votes/lesson, download the mind-map via
-  `Harvester._store_assets`, commit per question. Stops on the site's daily
-  limit with `status="limit"` and reports the remaining queue.
-- Server: repair refuses to start without a saved session; result carries
-  `remaining`; `/api/bank/health` exposes `needs_repair`.
-- Fixed while testing: `answer_audit.py` used `time.sleep` without importing
-  `time` (only reachable once the queue actually advanced).
+### A1/A2 — repair safety (`medo/answer_audit.py`, `medo/db.py`)
+`questions` gained `repair_reason` and `repair_retry_after`; a row keeps its
+reason and stays queued until a real repair succeeds. LOCKED / UNKNOWN / empty /
+quota-limited / rate-limited pages never mark a row repaired, and a daily-limit
+message stops the whole pass with the reason recorded. The length rule now works
+on normalized text: U+FE00..FE0F removed, trailing «MedoFast.ir» watermark
+stripped, decoy blocks (hyphenated-UUID `data-element-id`) dropped, whitespace
+collapsed; both normalized lengths are logged, the old row is kept with
+`[audit] kept old explanation`, and a clean FULL lesson always beats a dirty
+one.
 
-### 3.2 Pre-flight, pacing, locking (Phase 4)
-- `medo/doctor.py` + `medo doctor` + `GET /api/doctor`: Windows dead proxy,
-  fake-IP DNS vs direct reachability, TLS to `medofast.ir`, saved session, and
-  (`--deep`) a live check that `#question-meta` still exposes the question id.
-  One Persian verdict (`ready` / `auth` / `network`) and the VPN bypass-rule
-  help text.
-- Scrape and every network repair are gated by `doctor.quick_gate`; local PDF
-  rendering is **not** gated.
-- `medo/pacing.py` (`AdaptiveDelay`): 1.5–3 s start, ×2 per 429 up to 12 s,
-  `Retry-After` honoured (5–300 s), −10 % after 40 clean pages, floor 1.2 s.
-  `Harvester.pace` owns the range; wired at question save and throttle.
-- One `threading.Lock` guards the single job slot. `_begin_repair` now returns
-  `(bool, reason)`; `_take_slot` is the shared primitive (PDF uses it directly).
-- The full PDF is no longer rebuilt after every run: `POST /api/pdf` +
-  «ساخت PDF کتاب» builds the selected category (or the whole bank) on demand.
+### A3 — history audit (`scripts/dev/audit_push.py --history`)
+Walks `git rev-list --objects --all` with the same rules as the working-tree
+audit (sessions, `*.db`, `*.mhtml`, keystore, >1 MB files, long Persian
+paragraphs, text copied from `data/diag`) and prints path + commit + reason
+only. It never rewrites history. Allowlisted binaries are named explicitly:
+`android/libs/zxing-core.jar`, the five Vazirmatn `.woff2` files and the three
+PWA icons.
 
-### 3.3 Search, API, lesson rendering (Phase 5a)
-- One canonical search form:
-  `medo/text_utils.normalize_search_text`, `medo/web/normalize.js` (works as a
-  `<script>` and as a `require`-able module), `android/.../Text.java`.
-  Contract: `tests/search_vectors.json` (9 cases), asserted by Python, Node
-  (when installed) and the Java test harness.
-  Rules: Arabic ي/ى/ك → Persian, ZWNJ + invisible selectors removed, Persian and
-  Arabic-Indic digits → ASCII, whitespace collapsed, case folded.
-- `/api/questions` returns light rows (no `stem_html` / `explanation_html`) with
-  `offset`/`limit`; `/api/question/<id>` returns the full body. The UI loads
-  400-row pages, folds each question's search text once at load, debounces the
-  search 200 ms, and fetches a full body only when a lesson is opened.
-- FTS trigger narrowed to `AFTER UPDATE OF stem_text, explanation_text,
-  options_json`, so answer/bookmark clicks no longer re-index.
-- Pro lessons read as a document: `h4/h5/h6`, `ul/ol/li`, `mark`, `blockquote`
-  and the «تایید گزینه N» badge in `style.css` and `templates/book.html` (Jinja
-  filter `key_badge` for the PDF).
-- Android build from a clean clone: blanket `*.xml` ignore replaced by
-  `/coverage.xml`; `android/AndroidManifest.xml` + `android/res/**` tracked;
-  test asserts `git ls-files android` contains them. `build.sh` reads
-  versionCode/Name from the manifest and bumps the code only after a signed APK
-  exists; a missing keystore fails with a Persian message instead of generating
-  a new identity.
-- `medo keystore-backup`: zip + SHA-256 into `dist/keystore-backup/`.
+### A4 — `medo live-report`
+Adds: rows with `source_page = 0` (they can never get a site id), rows still
+without a site id grouped by cause, the repair queue grouped by reason, and the
+429 events of the last seven days with timestamp and the delay that was in
+force.
 
-### 3.4 Phone bank, v2 (Phase 5b)
-- `.medo` is now a ZIP: `index.json` (format/version, stats, tree, one light
-  entry per question with `chunk` id, chunk manifest) plus
-  `chunks/<root-category>.json` with full lesson bodies. Legacy single-JSON
-  files still load (`Bank.load` sniffs `PK`).
-- Android `Bank.parseZip` reads the index first, then each chunk straight from
-  the archive and replaces the light entry by id — one chunk resident at a time
-  instead of the whole file as `byte[]`, `String` and parsed tree.
-- `Bank.searchIds` builds a word → ids index lazily; `BrowseActivity` computes
-  the hit set once per query instead of folding every question per keystroke.
-- `medo build-bank --category/-c` (repeatable) ships selected categories;
-  `--images/--no-images` embeds small WebP mind-maps as data URIs.
-- Share server serves the zip with `application/zip`; `read_bundle()` can undo
-  the format in Python (tests/inspection).
+### B1 — Android «بانک من» (`Bank.flattenStored`, `MainActivity`)
+The home screen now has the desktop tree tabs. «بانک من» keeps only branches
+that hold at least one downloaded question (ancestors of a filled subtopic
+stay); «همهٔ دسته‌ها» shows the full site tree; the mode is remembered in
+`SharedPreferences`. No bundle format change was needed: every question already
+carries its `nodes`, so v1/v2 banks import unchanged and QR/Wi-Fi transfer
+carries the same data.
 
-### 3.5 Test hygiene and docs (Phase 6)
-- `tests/conftest.py`: session fixture runs `scripts/make_fixtures.py` when the
-  synthetic MHTML pair is absent (real captures are never generated; tests that
-  need them skip).
-- `pytest` + `pytest-asyncio` moved to `[project.optional-dependencies].dev`;
-  unused `aiofiles` removed.
-- Deleted `.github/workflows/scrape.yml` (scrape output must never be an
-  artifact), `_patch/`, `inspect_shortcut.ps1`; `launcher.log` untracked and
-  `*.log` ignored; a 1.2 MB junk file under `tests/fixtures` removed.
-- `README.md` rewritten from the real `--help` of every command; a test fails if
-  it documents a flag the CLI does not define.
-- `PROMPT.md` §8/§7.7/§11 updated (current state, new bug table with the
-  approaches that failed, file map + open work).
+### B2 — themes and text size (`Theme.java`, `Ui.java`, `SettingsActivity`)
+Five palettes (dark, AMOLED, light, sepia, blue-grey) × 20 semantic tokens.
+`Ui` now holds the active tokens and the four text sizes; every screen reads
+tokens only (camera screens keep their own dark constants, PDF keeps its print
+palette on white). A change is saved, applied on resume without restart, and the
+quiz view is rebuilt in place so the reader stays on the same question. The JVM
+suite proves every palette defines every token and that text keeps ≥ 4.5:1
+contrast on every surface it is drawn on.
+
+### B3 — faster, still polite (`medo/pacing.py`, `medo/scraper.py`)
+One request at a time is untouched. Speed comes from removing waste (no page-1
+reload after a position drift) and from learning: −10 % after 25 consecutive
+clean pages, floor 1.0 s, jitter kept; a 429 doubles the delay, records the
+failing value and sets a persistent ceiling of last-good × 1.25 that the next
+run starts from, with a visible cool-down instead of an immediate retry.
+Requests/minute, delay, today's 429s, questions/hour and ETA appear in the UI
+dock, the API and the CLI. A fake server that rejects anything faster than 2 s
+is used in tests to prove the pacer converges and never loops on 429.
+
+### B4 — long explanation layout
+Web: measured root cause — the lesson box hid its overflow, so one wide table or
+a 500-character token stretched `.explanation-body` to ~3900 px and the rest was
+clipped. The body now wraps anywhere, children stay inside the column, tables
+and `pre` scroll horizontally, images scale by width. `scripts/dev/make_long_lesson.py`
+builds a 48k-character lesson and `check_long_lesson.py` measures it in headless
+Chrome at 500 px and 1280 px (no horizontal overflow at either width).
+Android: `LessonText` prepares the stored HTML before `Html.fromHtml` — one line
+per table row with «·» between cells, list bullets, an image placeholder, and a
+zero-width break inside any run longer than 28 characters — so the text can
+always wrap. The JSON-suite covers a 30k-character lesson.
+
+### B5 — organizer with real progress (`medo/jobs.py`, server, UI, CLI)
+The job writes a database record per page: state, processed/total, current
+topic/page, items per minute, ETA, the last twenty log lines and a heartbeat.
+The UI polls it (survives reload), Stop is honoured at the next committed page
+with a hard-stop fallback, a 60-second silence is flagged with the last log
+line, and `medo organize` prints the same page-by-page output. Every page was
+already committed, so a stopped run resumes from its own cursor.
 
 ## 4. Verification (actual runs)
 
 | Check | Result |
 | --- | --- |
-| `pytest -q` (working tree) | **283 passed** |
-| Clean clone via `git archive HEAD`, existing venv | **272 passed, 11 skipped, 0 failed** |
-| `bash android/test.sh` | **ALL PASSED (140 checks)** — zip load, word search, normalization vectors, QR stride, answer keys |
-| `bash android/build.sh` | APK signed (280 KB), versionCode from manifest (2 → bumped to 3) |
-| `node --check medo/web/app.js` / `normalize.js` | clean |
-| `python -m compileall -q medo` | clean |
-| `medo build-bank` | zip bank 0.3 MB from the local DB; read back by the Java harness |
-| Live UI probe (`serve --port 8099`, Chromium) | 516 questions load and render; search `بيمار` (Arabic yeh) → 315 hits; clicking an option → `POST /api/answer` 200, then `GET /api/question/106` 200 and a 1,449-char lesson renders; no console errors |
+| `pytest -q` (working tree) | **321 passed** (102.8 s) |
+| `scripts/dev/clean_clone_test.py` (`git archive HEAD`) | audit **0 findings / 141 tracked files**, pytest **309 passed, 12 skipped** |
+| `bash android/test.sh` | **ALL PASSED (189 checks)**, three consecutive runs |
+| `bash android/build.sh` | signed `dist/medo.apk`, `versionCode 4`, `1.2`, 288 KB |
+| `scripts/dev/check_long_lesson.py` | `PASS: no horizontal overflow at 500px, 1280px` |
 
-The clean-clone run was done by exporting `HEAD` to `build/clean-clone` and
-running the repo's venv against it — not a brand-new `pip install` (no network
-for one was assumed). It proves the fixture generation and the repo being
-self-contained, not the dependency resolver.
+One pre-existing flaky check was corrected rather than weakened: `random picks
+answerable questions` now hydrates the picked id (`bank.question(id)`) before
+asserting on its options, because a light index entry carries no options by
+design.
 
-## 5. Decisions and deliberate deviations
+## 5. NOT VERIFIED (say this out loud)
 
-1. **`.medo` chunks are streamed at load, not lazily hydrated with an LRU of 2.**
-   `Question` is immutable and every screen iterates `bank.questions`; making
-   bodies defer would have required replacing objects across the UI. The memory
-   bug that mattered (three copies of the whole file) is fixed: peak is one
-   chunk plus the question objects. The upgrade path is documented in PROMPT §11
-   (the `positions` map is already there).
-2. **FTS5 kept, trigger narrowed.** The browser now searches its own normalized
-   index; FTS is only used by tests. PROMPT §11 records the two honest options
-   (wire it or delete it) rather than leaving it ambiguous.
-3. **`_begin_repair` signature changed to `(bool, str)`.** Callers now show the
-   real refusal reason (network verdict / other job) instead of a generic one.
-4. **No live-site claim.** The machine cannot reach `medofast.ir` reliably, so
-   `doctor`, live repair, live tag sync and a real login are implemented,
-   unit-tested and log their evidence — but were **not** exercised end-to-end
-   against production in this session.
+1. **Nothing has run against medofast.ir.** The live repair rules (A1/A2), the
+   `--site-ids` page tie-break and the learned pace (B3) are unit-tested only.
+2. **No Android device or emulator is attached.** The «بانک من» tab, the five
+   themes, the four text sizes and the long-lesson text are covered by the JVM
+   suite and a compile+dex+sign build; nobody has looked at a screen yet.
+3. **The Android half of B4 is a different fix from the web half.** The clipping
+   was reproduced and fixed on the web (measured). On Android the screen already
+   scrolled and had no fixed heights, so the two defects found by reading the
+   code (table cells merging, an unbreakable token) were fixed and unit-tested —
+   the original on-device symptom was not reproduced.
+4. The web lesson check uses a synthetic lesson at two widths, not a real stored
+   lesson in a real phone browser; theme contrast is computed from token values,
+   not measured on a rendered screen.
 
-## 6. Open work (ordered)
+## 6. Commands for the live pass (in order)
 
-1. Live proof with VPN routed direct: `medo doctor --deep` → small scrape →
-   `diagnose-tags` → one repair run; record in `NOTES.md`.
-2. Lazy per-chunk hydration + LRU 2 if a real bank outgrows phone RAM.
-3. Decide FTS5: wire `/api/questions?q=` or delete table + triggers + tests.
-4. Device test of the fresh APK and zip bank (QR import, browse, quiz, PDF,
-   search).
-5. Verify `build-bank --images` on a device for lesson-open latency.
+```bash
+.venv/Scripts/python -m medo.cli doctor
+.venv/Scripts/python -m medo.cli live-report --no-network      # paste this
+.venv/Scripts/python -m medo.cli diagnose-live --topic 15 --tag 1473
+.venv/Scripts/python -m medo.cli serve                         # «سلامت بانک» → repair one known topic
+.venv/Scripts/python scripts/backfill_tags.py --site-ids --topic 78 --max-pages 20 --dry-run
+.venv/Scripts/python -m medo.cli organize --topic 78 --max-pages 20
+bash android/build.sh && tools/sdk/platform-tools/adb.exe install -r dist/medo.apk
+```
 
 ## 7. Do not repeat these dead ends
 
-- Filtering Pro decoy blocks by `data-order`, block count, or HTML text —
-  visibility lives in a dynamic stylesheet; mark hidden nodes in the live page
-  and skip hyphenated-UUID blocks.
-- Deciding LOCKED from substrings anywhere in the lesson («پروگنوز» is not Pro).
-- Trusting the site's remembered position for a subtopic page 1; request the
-  page explicitly and verify the counter, else `paused`.
-- Committing tag mapping only after all subtopics, or matching ambiguous option
-  signatures to several questions.
-- Shipping the whole bank as one `SELECT *` JSON, or re-indexing FTS on every
-  answer click.
-- `*.xml` in `.gitignore`, hardcoded `--version-code 1`, generating a new
-  keystore on a missing key.
-- Loading the phone bank as `byte[]` → `String` → tree in one go.
+- Treating a LOCKED/empty/quota page as a successful repair, or comparing
+  lesson lengths without normalizing first (decoys and the watermark alone used
+  to make every comparison wrong).
+- Making speed come from parallelism, proxies, extra accounts or forged
+  cookies — the only accepted wins are removing redundant requests and learning
+  the safe delay.
+- Fixing a layout by hiding overflow: the lesson container must wrap and scroll,
+  never clip.
+- Splitting B1/B2/B4-Android into separate commits — they share `MainActivity`,
+  `QuizActivity` and `Ui`; a split leaves commits that do not compile.
