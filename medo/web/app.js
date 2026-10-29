@@ -1380,6 +1380,7 @@
     const job = st.job || 'scrape';
     // «ادامه» belongs to downloads only; a finished repair must not offer it.
     const resumable = !running && Boolean(st.can_resume) && job === 'scrape';
+    const jobProgress = st.job_progress;
     const jobTitle = job === 'answers' ? 'بازیابی پاسخ‌ها'
       : (job === 'tags' ? 'پخش سوال‌ها در زیرمبحث‌ها'
         : (job === 'pdf' ? 'ساخت PDF کتاب' : 'دانلود سوالات'));
@@ -1389,14 +1390,20 @@
         ? 'در حال توقف ' + jobTitle + '…'
         : (job === 'scrape'
           ? 'در حال دانلود سوالات — صفحه ' + toPersianDigits(st.current_page || 0)
-          : 'در حال ' + jobTitle + '…');
+          : (jobProgress && jobProgress.total
+            ? 'در حال ' + jobTitle + ' — '
+              + toPersianDigits(jobProgress.processed)
+              + ' از ' + toPersianDigits(jobProgress.total) + ' صفحه'
+            : 'در حال ' + jobTitle + '…'));
     } else if (resumable) {
       elements.dlDockTitle.textContent = 'دانلود نیمه‌تمام — '
         + toPersianDigits(st.pending_count || 0) + ' مبحث آمادهٔ ادامه';
     } else if (job === 'answers') {
       elements.dlDockTitle.textContent = 'بازیابی پاسخ‌ها تمام شد';
-    } else if (job === 'tags') {
-      elements.dlDockTitle.textContent = 'زیرمبحث‌ها به‌روزرسانی شد';
+    } else    if (job === 'tags') {
+      elements.dlDockTitle.textContent = jobProgress && jobProgress.state === 'stopped'
+        ? 'پخش زیرمبحث‌ها متوقف شد — قابل ادامه'
+        : 'زیرمبحث‌ها به‌روزرسانی شد';
     } else if (job === 'pdf') {
       elements.dlDockTitle.textContent = st.status === 'completed'
         ? 'فایل PDF ساخته شد — dist/medo_test_book.pdf'
@@ -1410,13 +1417,23 @@
     elements.dlDockCount.textContent = job === 'answers'
       ? toPersianDigits(st.scraped_count || 0) + ' پاسخ بازیابی شد'
       : (job === 'tags'
-        ? 'نتیجه در گزارش پایین'
+        ? (jobProgress
+          ? toPersianDigits(jobProgress.processed || 0) + ' از '
+            + toPersianDigits(jobProgress.total || 0) + ' صفحه'
+          : 'نتیجه در گزارش پایین')
         : (job === 'pdf'
           ? 'خروجی در پوشهٔ dist'
           : toPersianDigits(st.scraped_count || 0) + ' سوال ذخیره شد'));
-    elements.dlDockPage.textContent = resumable
-      ? toPersianDigits(st.pending_count || 0) + ' مبحث ادامه‌پذیر'
-      : '';
+    elements.dlDockPage.textContent = job === 'tags' && jobProgress
+      ? (jobProgress.stalled
+        ? 'هشدار: ۶۰ ثانیه بدون پیشرفت — ' + (jobProgress.last_log || '')
+        : (jobProgress.items_per_minute || 0) + ' صفحه/دقیقه'
+          + (jobProgress.eta_seconds
+            ? ' · زمان تقریبی ' + toPersianDigits(Math.max(1, Math.round(jobProgress.eta_seconds / 60))) + ' دقیقه'
+            : ''))
+      : (resumable
+        ? toPersianDigits(st.pending_count || 0) + ' مبحث ادامه‌پذیر'
+        : '');
     elements.dlDockStopBtn.hidden = !running || stopping;
     elements.dlDockResumeBtn.hidden = !resumable;
     elements.dlDockBar.classList.toggle('live', running && !stopping);
@@ -1762,6 +1779,11 @@
     if (s.cooldown_seconds > 0) {
       parts.push('توقف موقت ' + toPersianDigits(s.cooldown_seconds) + ' ثانیه');
     }
+    const jp = st && st.job_progress;
+    if (jp && jp.stalled) {
+      parts.push('هشدار: بیش از ۶۰ ثانیه بدون پیشرفت — '
+        + (jp.last_log || 'بدون گزارش'));
+    }
     return parts.join(' · ');
   }
 
@@ -1788,6 +1810,16 @@
       renderScrapeStats(st);
       renderUsage(st);
       renderScrapeDock(st);
+      const jp = st.job_progress;
+      if (jp && jp.total) {
+        const pct = Math.max(0, Math.min(100, 100 * jp.processed / jp.total));
+        elements.scrapeProgressBar.classList.remove('indeterminate');
+        elements.scrapeProgressBar.style.width = pct.toFixed(1) + '%';
+        elements.dlDockBar.style.width = pct.toFixed(1) + '%';
+      }
+      if (jp && jp.logs && jp.logs.length && renderedLogCount === 0) {
+        jp.logs.forEach(appendScrapeLog);
+      }
 
       // `logs` is a sliding window (the last 25 lines), so the number of new
       // lines has to come from the server's monotonic sequence counter —

@@ -160,6 +160,31 @@ def init_db(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_log(started_at);"
         )
 
+        # One row per long job (subtopic mapping, repair).  The UI and CLI
+        # poll this instead of relying on a thread's memory: a page reload or
+        # an app restart can still show progress, the last log line and
+        # whether the job is stalled.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'running',
+                total INTEGER NOT NULL DEFAULT 0,
+                processed INTEGER NOT NULL DEFAULT 0,
+                current TEXT,
+                logs TEXT,
+                last_log TEXT,
+                stop_requested INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_progress_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_kind_started "
+            "ON jobs(kind, started_at DESC);")
+
         # Small key/value store for learned behaviour that must survive a
         # restart: today the adaptive pace (the range and the learned ceiling
         # after a 429), later the daily data budget.

@@ -58,9 +58,35 @@ from medo.db import (  # noqa: E402
     update_tag_sync_state,
 )
 from medo.parser import parse_question_html, _clean_text  # noqa: E402
+from medo import jobs  # noqa: E402
 
 BASE = "https://medofast.ir"
 MIN_DELAY = 1.5          # the site throttles faster walks than this
+
+
+class JobStopped(RuntimeError):
+    """The owner pressed Stop; the current page was committed already."""
+
+
+def _job_id(args) -> int | None:
+    return getattr(args, "job_id", None)
+
+
+def _job_stop(conn, args) -> bool:
+    return jobs.stop_requested(conn, _job_id(args))
+
+
+def _job_update(conn, args, **fields) -> None:
+    job_id = _job_id(args)
+    if job_id:
+        jobs.update_job(conn, job_id, **fields)
+
+
+def _job_log(conn, args, line: str) -> None:
+    job_id = _job_id(args)
+    if job_id:
+        jobs.add_log(conn, job_id, line)
+    print(line, flush=True)
 
 
 def signature(options) -> str:
@@ -250,7 +276,11 @@ def map_subtopics(conn, page, topic_id: int, args, delay: float, stats: dict) ->
         if state.get("status") in {"running", "paused", "throttled"} and not args.refetch:
             start = max(1, int(state.get("last_page") or 0) + 1)
 
+        if _job_stop(conn, args):
+            raise JobStopped("stopped before subtopic")
         try:
+            _job_update(conn, args,
+                        current=f"topic {topic_id} tag {tag}: first page")
             first = fetch_json(page, topic_id, tag, 1, pause=args.pause)
             total_pages = int((first.get("pagination") or {}).get("total_pages") or 0)
             if args.max_pages:
@@ -259,17 +289,24 @@ def map_subtopics(conn, page, topic_id: int, args, delay: float, stats: dict) ->
                 update_tag_sync_state(conn, topic_id, tag, total_pages, "completed")
                 stats["skipped_done"] += 1
                 continue
+            _job_update(conn, args, total=int(stats.get("pages_total", 0))
+                        + (total_pages or 1))
+            stats["pages_total"] = int(stats.get("pages_total", 0)) + (total_pages or 1)
 
             payloads: list[tuple[int, dict]] = []
             if start <= 1:
                 payloads.append((1, first))
             for page_no in range(max(2, start), total_pages + 1):
+                if _job_stop(conn, args):
+                    raise JobStopped("stopped while fetching pages")
                 time.sleep(max(0.0, delay))
                 payloads.append(
                     (page_no, fetch_json(page, topic_id, tag, page_no, pause=args.pause)))
 
             fetched = matched = 0
             for page_no, payload in payloads:
+                if _job_stop(conn, args):
+                    raise JobStopped("stopped at page boundary")
                 fetched += 1
                 parsed = parse_question_html(
                     payload.get("html") or "", submitted=False, source_url="",
@@ -295,12 +332,21 @@ def map_subtopics(conn, page, topic_id: int, args, delay: float, stats: dict) ->
                     # here means a 429 on the next page costs nothing.
                     conn.commit()
                     update_tag_sync_state(conn, topic_id, tag, page_no, "running")
+                stats["pages_done"] = int(stats.get("pages_done", 0)) + 1
+                _job_update(
+                    conn, args,
+                    processed=int(stats.get("pages_done", 0)),
+                    current=f"topic {topic_id} tag {tag} page {page_no}")
+                _job_log(conn, args,
+                         f"topic {topic_id} tag {tag} page {page_no}: "
+                         f"{'matched' if question_id else how}")
 
             if not args.dry_run:
                 update_tag_sync_state(conn, topic_id, tag,
                                       total_pages or fetched, "completed")
-            print(f"  tag {tag:>5} «{sub['title'][:38]}»: {fetched} page(s), "
-                  f"{matched} match(es)")
+            _job_log(conn, args,
+                     f"topic {topic_id} tag {tag}: {fetched} page(s), "
+                     f"{matched} match(es)")
         except Throttled:
             if not args.dry_run:
                 update_tag_sync_state(conn, topic_id, tag, start - 1, "throttled")
@@ -366,7 +412,12 @@ def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) ->
         return
     by_signature = load_bank(conn, topic_id)
     print(f"\n[topic {topic_id}] site ids: {len(pages)} page(s) to re-read")
+    _job_update(conn, args, total=int(stats.get("pages_total", 0)) + len(pages))
+    stats["pages_total"] = int(stats.get("pages_total", 0)) + len(pages)
     for page_no in pages:
+        if _job_stop(conn, args):
+            raise JobStopped("stopped at site-id page boundary")
+        _job_update(conn, args, current=f"topic {topic_id} page {page_no} (site id)")
         payload = fetch_json(page, topic_id, None, page_no, pause=args.pause)
         parsed = parse_question_html(
             payload.get("html") or "", submitted=False, source_url="",
@@ -374,13 +425,17 @@ def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) ->
         site_id = getattr(parsed, "site_question_id", None)
         question_id, how = match_question_on_page(
             conn, parsed, by_signature, topic_id, page_no)
+        stats["pages_done"] = int(stats.get("pages_done", 0)) + 1
+        _job_update(conn, args, processed=int(stats.get("pages_done", 0)))
         if question_id is None:
             if how.startswith("ambiguous"):
                 stats["ambiguous"] += 1
             stats["id_skipped"] += 1
+            _job_log(conn, args, f"topic {topic_id} page {page_no}: skipped ({how})")
             continue
         if not site_id:
             stats["id_skipped"] += 1
+            _job_log(conn, args, f"topic {topic_id} page {page_no}: skipped (no site id)")
             continue
         if not args.dry_run:
             conn.execute(
@@ -390,6 +445,7 @@ def fill_site_ids(conn, page, topic_id: int, args, delay: float, stats: dict) ->
             )
             conn.commit()
         stats["id_filled"] += 1
+        _job_log(conn, args, f"topic {topic_id} page {page_no}: site id filled")
         time.sleep(max(0.0, delay))
 
 
@@ -415,6 +471,8 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="report the mapping without writing it")
     parser.add_argument("--db", default=None, help="database path")
+    parser.add_argument("--job-id", type=int, default=None,
+                        help="jobs row the desktop UI polls (internal)")
     args = parser.parse_args()
     delay = max(float(args.delay), MIN_DELAY)
 
@@ -450,8 +508,12 @@ def main() -> int:
             print(f"[i] backup: {copy.name}")
 
     stats = {"mapped": 0, "ambiguous": 0, "no_options": 0,
-             "skipped_done": 0, "id_filled": 0, "id_skipped": 0}
+             "skipped_done": 0, "id_filled": 0, "id_skipped": 0,
+             "pages_total": 0, "pages_done": 0}
     stopped_early = None
+    stopped_by_user = False
+    _job_update(conn, args, current=f"starting {len(topics)} topic(s)")
+    _job_log(conn, args, f"started: {len(topics)} topic(s)")
     try:
         with sync_playwright() as p:
             # Same launcher as the scraper: real Chrome, stealth defaults,
@@ -485,6 +547,9 @@ def main() -> int:
                 else:
                     map_subtopics(conn, page, topic_id, args, delay, stats)
             browser.close()
+    except JobStopped as exc:
+        stopped_by_user = True
+        _job_log(conn, args, f"stopped by owner at {exc}")
     except Throttled as exc:
         stopped_early = exc
     finally:
@@ -503,6 +568,10 @@ def main() -> int:
                     "GROUP BY q.topic_id ORDER BY n DESC")]
             except Exception:
                 leftovers = []
+        state = ("stopped" if stopped_by_user else
+                 "throttled" if stopped_early else "completed")
+        _job_update(conn, args, state=state,
+                    current="finished" if state == "completed" else "stopped")
         conn.close()
 
     if stopped_early:

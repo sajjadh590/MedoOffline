@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 import re
+import subprocess
 import sys
 import typer
 from rich.console import Console
@@ -377,6 +378,38 @@ def verify(
         console.print("[bold green][+] Database integrity check: ALL PASSED![/bold green]")
     else:
         console.print("[bold yellow][!] Some questions have warnings above.[/bold yellow]")
+
+
+@app.command(name="organize")
+def organize(
+    topic: list[int] = typer.Option(None, "--topic", "-t",
+                                    help="topic id (repeatable); empty = all"),
+    site_ids: bool = typer.Option(False, "--site-ids",
+                                  help="fill missing site ids instead"),
+    max_pages: int = typer.Option(0, "--max-pages",
+                                  help="stop after N pages per subtopic"),
+    db_path: Path = typer.Option(DEFAULT_DB_PATH, "--db"),
+):
+    """Map stored questions to their subtopics, with live page progress.
+
+    Same output as the desktop button and `scripts/backfill_tags.py`; every
+    page is committed, so Ctrl+C and a re-run resume at the failed page.
+    """
+    cmd = [sys.executable, str(PROJECT_ROOT / "scripts" / "backfill_tags.py"),
+           "--db", str(db_path), "--max-pages", str(int(max_pages)),
+           "--delay", "1.2", "--pause", "45"]
+    if topic:
+        for value in topic:
+            cmd += ["--topic", str(int(value))]
+    else:
+        cmd.append("--all")
+    if site_ids:
+        cmd.append("--site-ids")
+    try:
+        raise typer.Exit(code=subprocess.call(cmd, cwd=str(PROJECT_ROOT)))
+    except KeyboardInterrupt:
+        console.print("[yellow]متوقف شد؛ هر صفحهٔ ذخیره‌شده مانده است.[/yellow]")
+        raise typer.Exit(code=130)
 
 
 @app.command(name="diagnose-tags")

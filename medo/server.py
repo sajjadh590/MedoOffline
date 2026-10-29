@@ -71,6 +71,7 @@ class ScraperTaskController:
         # check-then-set of the single job slot needs a real lock or two
         # clicks can both pass the check.
         self._job_lock = threading.Lock()
+        self.job_id: int | None = None
         self.is_running = False
         self.status = "idle"
         self.topic_id = 0
@@ -812,6 +813,19 @@ class ScraperTaskController:
         self.thread.start()
         return True, "بازیابی پاسخ سوالات بدون پاسخ شروع شد (با حساب واردشده)."
 
+    def _latest_job_payload(self, kind: str = "tags") -> dict | None:
+        """The durable record the UI polls; survives a page reload/restart."""
+        try:
+            from medo.jobs import latest_job
+
+            conn = get_connection(self.db_path)
+            try:
+                return latest_job(conn, kind)
+            finally:
+                conn.close()
+        except Exception:
+            return None
+
     def start_tag_sync(self, db_path=DEFAULT_DB_PATH) -> tuple[bool, str]:
         """Map stored questions to their subtopics (existing backfill script)."""
         started, reason = self._begin_repair(
@@ -819,39 +833,79 @@ class ScraperTaskController:
         if not started:
             return False, reason
 
+        from medo import jobs
+
+        conn = get_connection(db_path)
+        try:
+            job_id = jobs.create_job(conn, "tags", current="در حال آماده‌سازی")
+            jobs.add_log(conn, job_id, "job started")
+        finally:
+            conn.close()
+        self.job_id = job_id
+
         def _worker():
             script = PROJECT_ROOT / "scripts" / "backfill_tags.py"
             status = "completed"
+            stop_deadline = None
             try:
                 proc = subprocess.Popen(
                     [sys.executable, str(script), "--all", "--db", str(db_path),
-                     "--delay", "1.2", "--pause", "45"],
+                     "--delay", "1.2", "--pause", "45",
+                     "--job-id", str(job_id)],
                     cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                     errors="replace", bufsize=1,
                 )
-                for line in proc.stdout or []:
+                pending: list[str] = []
+
+                def _reader():
+                    for raw in proc.stdout or []:
+                        pending.append(raw.rstrip())
+
+                threading.Thread(target=_reader, daemon=True).start()
+                while proc.poll() is None:
+                    while pending:
+                        line = pending.pop(0).strip()
+                        if line:
+                            self._push(line)
+                    if self.cancel_requested:
+                        if stop_deadline is None:
+                            stop_deadline = time.monotonic() + 10.0
+                            c = get_connection(db_path)
+                            try:
+                                jobs.request_stop(c, job_id)
+                            finally:
+                                c.close()
+                            self._push("درخواست توقف ثبت شد؛ صفحهٔ جاری تمام و "
+                                       "ذخیره می‌شود...")
+                        elif time.monotonic() >= stop_deadline:
+                            proc.terminate()
+                            status = "interrupted"
+                            self._push("توقف سخت پس از ۱۰ ثانیه اعمال شد.")
+                            break
+                    time.sleep(0.2)
+                for line in pending:
                     line = line.strip()
                     if line:
                         self._push(line)
-                    if self.cancel_requested:
-                        proc.terminate()
-                        status = "interrupted"
-                        break
                 code = proc.wait()
-                if status != "interrupted" and code == 1:
-                    # The script stops cleanly when the site throttles the
-                    # filtered endpoint; a re-run skips finished subtopics.
+                conn = get_connection(db_path)
+                try:
+                    job = jobs.get_job(conn, job_id) or {}
+                finally:
+                    conn.close()
+                if job.get("state") == "stopped" or self.cancel_requested:
+                    status = "interrupted"
+                    self._push("پخش زیرمبحث‌ها با درخواست شما متوقف شد؛ "
+                               "هر صفحهٔ ذخیره‌شده مانده و اجرای بعدی از همان‌جا "
+                               "ادامه می‌دهد.")
+                elif job.get("state") == "error" or code not in (0,):
                     status = "error"
-                    self._push("سایت این درخواست‌ها را موقتاً محدود کرد (۴۲۹)؛ هر "
-                               "چه ساخته شده ذخیره است. اگر «وارد حساب» نشده‌ای اول "
-                               "وارد شو (سهمیهٔ مهمان خیلی کم است)، ۱۵ تا ۳۰ دقیقه "
-                               "صبر کن و همین دکمه را بزن — زیرمبحث‌های کامل‌شده رد "
-                               "می‌شوند و از همان‌جا ادامه می‌دهد.")
-                elif status != "interrupted" and code != 0:
-                    status = "error"
-                    self._push(f"اسکریپت با کد {code} تمام شد؛ هر چه ساخته شده ذخیره است.")
-                elif status != "interrupted":
+                    self._push("سایت این درخواست‌ها را موقتاً محدود کرد یا خطا "
+                               "داد؛ هر چه ساخته شده ذخیره است. اگر «وارد حساب» "
+                               "نشده‌ای اول وارد شو، کمی بعد دوباره بزن — "
+                               "زیرمبحث‌های کامل‌شده رد می‌شوند.")
+                else:
                     self._push("زیرمبحث‌ها به‌روزرسانی شد.")
                 self._rebuild_after_repair(db_path)
             except Exception as ex:
@@ -1082,6 +1136,8 @@ class ScraperTaskController:
             "logs": self.logs[-25:],
             "logs_seq": self.log_seq,
             "stats": live,
+            "job_progress": (self._latest_job_payload("tags")
+                             if self.job in ("tags", "") else None),
             "login_in_progress": self.login_in_progress,
             "usage": self._usage_status(pending),
             "can_resume": bool(pending) and not self.is_running,
