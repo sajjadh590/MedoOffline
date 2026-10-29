@@ -693,6 +693,49 @@ body {
   font-size: 0.98rem;
   line-height: 1.85;
   color: var(--text-main);
+  /* A lesson can contain anything the site uploaded.  Without these three a
+     wide table or one unbroken token pushed the body to ~3900px and the box's
+     overflow:hidden cut it in half instead of scrolling. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.explanation-body > * {
+  max-width: 100%;
+}
+
+/* Wide tables scroll inside the lesson, never stretch the page. */
+.explanation-body table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 0.92rem;
+}
+
+.explanation-body th,
+.explanation-body td {
+  border: 1px solid var(--border-color);
+  padding: 6px 10px;
+  text-align: right;
+}
+
+.explanation-body th {
+  background: var(--opt-bg);
+  font-weight: 700;
+}
+
+.explanation-body pre {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--opt-bg);
 }
 
 /* A Pro lesson is a small document, not one paragraph: the site's blocks are
@@ -752,6 +795,7 @@ body {
 
 .explanation-body img {
   max-width: 100%;
+  height: auto;
   border-radius: 12px;
   margin: 16px 0;
   cursor: zoom-in;
