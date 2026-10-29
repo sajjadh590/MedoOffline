@@ -16,6 +16,7 @@ Only paths and counts are printed — never the content itself.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
@@ -35,6 +36,23 @@ FORBIDDEN_SUFFIXES = {
     ".jks", ".log", ".sqlite", ".sqlite3",
 }
 FORBIDDEN_NAMES = ("storage_state", "cookies.json")
+
+# Checked-in binaries are allowed only when they are small, needed offline and
+# carry no private data.  Everything else (an APK, a keystore, a database) is
+# a build artifact and must stay local.  Printed by every run so the list is
+# not a secret rule.
+BINARY_ALLOWLIST = {
+    "android/libs/zxing-core.jar":
+        "offline QR decoding dependency (607 KB, no Gradle/network)",
+    "medo/web/fonts/Vazirmatn-Bold.woff2": "bundled Persian font (51 KB, offline UI)",
+    "medo/web/fonts/Vazirmatn-Light.woff2": "bundled Persian font (51 KB, offline UI)",
+    "medo/web/fonts/Vazirmatn-Medium.woff2": "bundled Persian font (51 KB, offline UI)",
+    "medo/web/fonts/Vazirmatn-Regular.woff2": "bundled Persian font (51 KB, offline UI)",
+    "medo/web/fonts/Vazirmatn-SemiBold.woff2": "bundled Persian font (51 KB, offline UI)",
+    "medo/web/icons/icon-192.png": "PWA icon (8 KB)",
+    "medo/web/icons/icon-512.png": "PWA icon (26 KB)",
+    "medo/web/icons/medo.ico": "PWA icon (24 KB)",
+}
 TEXT_SUFFIXES = {
     ".py", ".js", ".java", ".md", ".txt", ".html", ".htm", ".css", ".json",
     ".xml", ".sh", ".bat", ".ps1", ".toml", ".cfg", ".ini", ".yml", ".yaml",
@@ -98,6 +116,11 @@ def _capture_texts(root: Path) -> list[tuple[str, str]]:
         if len(text) >= CAPTURE_WINDOW:
             found.append((path.name, text))
     return found
+
+
+def is_binary_allowlisted(rel: str) -> bool:
+    """True for a checked-in binary whose size and purpose are documented."""
+    return rel in BINARY_ALLOWLIST
 
 
 def _read_text(path: Path) -> str | None:
@@ -171,7 +194,119 @@ def audit_paths(root: Path, paths: list[str]) -> list[str]:
     return findings
 
 
+def _git(root: Path, *args: str, binary: bool = False):
+    result = subprocess.run(["git", "-C", str(root), *args],
+                            capture_output=True, check=False)
+    if binary:
+        return result.stdout
+    return result.stdout.decode("utf-8", "replace")
+
+
+def _history_entries(root: Path) -> list[tuple[str, str]]:
+    """(object id, path) for every blob reachable from any ref."""
+    out = _git(root, "rev-list", "--objects", "--all")
+    found: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line in out.splitlines():
+        oid, _, rel = line.partition(" ")
+        if not rel or not oid:
+            continue
+        key = (oid, rel)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(key)
+    return found
+
+
+def _commit_for(root: Path, oid: str) -> str:
+    out = _git(root, "log", "--all", "--format=%H", f"--find-object={oid}",
+               "-1").strip()
+    return out.splitlines()[0] if out else "?"
+
+
+def _blob(root: Path, oid: str) -> bytes | None:
+    data = _git(root, "cat-file", "-p", oid, binary=True)
+    return data or None
+
+
+def scan_history(root: Path = ROOT) -> list[str]:
+    """Findings in every reachable commit, as `path @ commit: reason`.
+
+    Read-only: history is never rewritten.  The current capture texts (if the
+    owner still has data/diag) are used for copy detection; without them the
+    rule honestly cannot fire, and the summary says so.
+    """
+    if not (root / ".git").exists():
+        return ["history: not a git checkout"]
+    captures = _capture_texts(root)
+    findings: list[str] = []
+    for oid, rel in _history_entries(root):
+        lower = rel.lower()
+        parts = {p.lower() for p in Path(rel).parts[:-1]}
+        name = Path(rel).name.lower()
+        reason = None
+        if is_binary_allowlisted(rel):
+            continue
+        if parts & FORBIDDEN_DIRS:
+            reason = "under a private folder"
+        elif any(bad in name for bad in FORBIDDEN_NAMES):
+            reason = "session/cookie file"
+        elif Path(rel).suffix.lower() in FORBIDDEN_SUFFIXES:
+            reason = "private/generated file type"
+        else:
+            data = _blob(root, oid)
+            if data is None:
+                reason = "unreadable blob"
+            elif len(data) > MAX_BYTES:
+                reason = f"{len(data) / 1_000_000:.1f} MB (limit 1 MB)"
+            elif Path(rel).suffix.lower() in TEXT_SUFFIXES and b"\x00" not in data[:4096]:
+                text = data.decode("utf-8", "replace")
+                long_line = max((len(_FA.findall(line))
+                                 for line in text.splitlines()), default=0)
+                if long_line >= PROSE_LIMIT:
+                    reason = f"{long_line} Persian letters on one line"
+                elif captures:
+                    bare = _bare(text)
+                    for capture_name, capture in captures:
+                        if len(bare) < CAPTURE_WINDOW:
+                            continue
+                        if any(capture[start:start + CAPTURE_WINDOW] in bare
+                               for start in range(0, len(capture) - CAPTURE_WINDOW + 1,
+                                                  CAPTURE_STEP)):
+                            reason = f"text copied from data/diag/{capture_name}"
+                            break
+        if reason:
+            commit = _commit_for(root, oid)
+            findings.append(f"{rel} @ {commit[:12]}: {reason}")
+    return findings
+
+
+def _print_allowlist() -> None:
+    for rel, why in BINARY_ALLOWLIST.items():
+        print(f"[audit_push] allowlisted binary: {rel} — {why}")
+    print("[audit_push] NOT allowlisted: any *.apk (e.g. dist/medo.apk), "
+          "*.db, *.mhtml, keystore/log/session file — keep them local.")
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--history", action="store_true",
+                        help="scan every reachable commit, not just the index")
+    args = parser.parse_args()
+    _print_allowlist()
+    if args.history:
+        findings = scan_history(ROOT)
+        for line in findings:
+            print(f"FAIL {line}")
+        print(f"[audit_push] history: {len(findings)} finding(s) across "
+              f"{_git(ROOT, 'rev-list', '--all', '--count').strip()} commit(s)")
+        if findings:
+            print("[audit_push] history was NOT rewritten. To clean it you would "
+                  "need git filter-repo/filter-branch — ask the owner first; "
+                  "a force-push is destructive and is never done automatically.")
+        return 1 if findings else 0
+
     try:
         paths = tracked_files(ROOT)
     except SystemExit as exc:

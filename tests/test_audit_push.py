@@ -1,5 +1,6 @@
 """tests/test_audit_push.py — the rules that keep private data out of git."""
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -72,3 +73,51 @@ def test_an_export_is_walked_instead_of_the_parent_repo(audit, tmp_path):
     (tmp_path / "medo.py").write_text("x", encoding="utf-8")
     assert audit.tracked_files(tmp_path) is None
     assert audit.all_files(tmp_path) == ["medo.py"]
+
+
+def _git_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email",
+                    "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name",
+                    "test"], check=True)
+
+
+def test_history_finds_private_files_in_old_commits(audit, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_repo(repo)
+    (repo / "data").mkdir()
+    (repo / "data" / "medo.db").write_bytes(b"private")
+    (repo / "page.mhtml").write_text("saved page", encoding="utf-8")
+    (repo / "lesson.md").write_text("س" * 320, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "old"],
+                   check=True)
+    (repo / "launcher.log").write_text("log", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "log"],
+                   check=True)
+
+    findings = audit.scan_history(repo)
+    text = "\n".join(findings)
+    assert "data/medo.db @" in text
+    assert "under a private folder" in text
+    assert "page.mhtml @" in text
+    assert "lesson.md @" in text
+    assert "Persian letters on one line" in text
+    assert "launcher.log @" in text
+
+
+def test_history_skips_the_documented_binary_allowlist(audit, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "android" / "libs").mkdir(parents=True)
+    _git_repo(repo)
+    (repo / "android" / "libs" / "zxing-core.jar").write_bytes(b"PK\x03\x04jar")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "jar"],
+                   check=True)
+
+    assert audit.scan_history(repo) == []
+    assert audit.is_binary_allowlisted("android/libs/zxing-core.jar")
+    assert not audit.is_binary_allowlisted("dist/medo.apk")
